@@ -1,0 +1,74 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.Python
+repomix.config.json
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and local config
+*.log
+local_settings.py
+config_local.py
+secrets.json
+.env
+.env.*
+
+# Assets and large binaries (opcional: descomentar si no quieres versionar imágenes)
+# src/assets/*.png
+# src/assets/*.jpg
+# src/assets/*.jpeg
+# src/assets/*.gif
+
+# Test artifacts
+tests/__pycache__/
+tests/*.log
+
+# Generated GUI assets / caches
+*.db
+*.sqlite3
+
+# Python wheel
+*.whl
+
+# Misc
+coverage_html_report/

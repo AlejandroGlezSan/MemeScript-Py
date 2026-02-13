@@ -46,6 +46,7 @@ The content is organized as follows:
 <directory_structure>
 README.md
 requirements.txt
+src/__init__.py
 src/api_client.py
 src/main.py
 src/renderer.py
@@ -54,6 +55,10 @@ src/text_pool.py
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="src/__init__.py">
+
+</file>
 
 <file path="README.md">
 # MemeScript-Py
@@ -95,9 +100,14 @@ pip install -r requirements.txt
 </file>
 
 <file path="requirements.txt">
-customtkinter
-requests
-pillow
+# Dependencias principales
+customtkinter==5.2.2
+requests==2.31.0
+Pillow==10.2.0
+
+# Herramientas de desarrollo (opcional, para calidad de código)
+# flake8==7.0.0
+# black==24.2.0
 </file>
 
 <file path="src/api_client.py">
@@ -142,35 +152,25 @@ import io
 import logging
 import threading
 import traceback
-import sys
 import random
 from typing import Optional, Tuple
-from pathlib import Path
 
 import customtkinter as ctk
 import requests
 from PIL import Image
 
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from api_client import get_random_meme_url
+from renderer import render_meme
+from text_pool import get_random_phrase
 
 
-try:
-    from src.api_client import get_random_meme_url
-    from src.renderer import render_meme
-    from src.text_pool import get_random_phrase
-except Exception:
-
-    from api_client import get_random_meme_url
-    from renderer import render_meme
-    from text_pool import get_random_phrase
-
+MAX_FILE_SIZE = 12 * 1024 * 1024
+DOWNLOAD_TIMEOUT = 15
+PREVIEW_SIZE = (900, 900)
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
-
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("memeScript")
@@ -178,10 +178,9 @@ logger = logging.getLogger("memeScript")
 
 class MemeApp(ctk.CTk):
 
-
     def __init__(self, width: int = 1000, height: int = 700):
         super().__init__()
-        self.title("MemeScript-Py")
+        self.title("MemeScript-Py (Refactorizado)")
         self.geometry(f"{width}x{height}")
         self.minsize(700, 500)
 
@@ -202,14 +201,13 @@ class MemeApp(ctk.CTk):
         self.btn_generate = ctk.CTkButton(master=self.frame_left, text="Generar meme", command=self._on_generate_meme)
         self.btn_generate.pack(pady=(4, 8), padx=8, fill="x")
 
-
         self.use_random_var = ctk.BooleanVar(value=True)
         self.chk_random = ctk.CTkCheckBox(master=self.frame_left, text="Usar frases aleatorias", variable=self.use_random_var)
         self.chk_random.pack(pady=(8, 8), padx=8, anchor="w")
 
         self.lbl_custom = ctk.CTkLabel(master=self.frame_left, text="Texto personalizado (opcional):")
         self.lbl_custom.pack(pady=(8, 4), padx=8, anchor="w")
-        self.entry_custom = ctk.CTkEntry(master=self.frame_left, placeholder_text="Escribe texto para arriba|abajo (separa con |)")
+        self.entry_custom = ctk.CTkEntry(master=self.frame_left, placeholder_text="Escribe texto para arriba|abajo")
         self.entry_custom.pack(pady=(0, 8), padx=8, fill="x")
 
 
@@ -219,150 +217,126 @@ class MemeApp(ctk.CTk):
         self.canvas = ctk.CTkLabel(master=self.preview_frame, text="Aquí se mostrará la plantilla", anchor="center")
         self.canvas.pack(fill="both", expand=True, padx=8, pady=8)
 
-
         self._current_ctk_image: Optional[ctk.CTkImage] = None
 
 
-    def _on_test_api(self):
 
-        self._set_status("Comprobando conexión a Imgflip...", info=True)
+    def _download_template(self) -> Tuple[Image.Image, str]:
+
+        meme_url = get_random_meme_url()
+        if not meme_url:
+            raise RuntimeError("No se obtuvo URL de plantilla desde Imgflip.")
+
+        resp = requests.get(meme_url, timeout=DOWNLOAD_TIMEOUT, stream=True)
+        resp.raise_for_status()
+
+        content_len = resp.headers.get("Content-Length")
+        if content_len and int(content_len) > MAX_FILE_SIZE:
+            raise RuntimeError("Imagen demasiado grande (>12MB).")
+
+        img_bytes = resp.content
+        image = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        return image, meme_url
+
+    def _resolve_text_placement(self) -> Tuple[str, str, str]:
+
+        top_text, bottom_text = "", ""
+
+        # Caso 1: Aleatorio
+        if self.use_random_var.get():
+            phrase = get_random_phrase()
+            pos = random.choice(["top", "bottom"])
+            if pos == "top":
+                return phrase, "", f"Generando meme (frase en {pos})."
+            return "", phrase, f"Generando meme (frase en {pos})."
+
+        # Caso 2: Personalizado
+        custom_text = (self.entry_custom.get() or "").strip()
+        if not custom_text:
+            return "", "", "Generando plantilla vacía."
+
+        if "|" in custom_text:
+            parts = custom_text.split("|", 1)
+            return parts[0].strip(), parts[1].strip(), "Generando meme (texto manual dividido)."
+
+        # Caso 3: Personalizado simple (una sola línea)
+        pos = random.choice(["top", "bottom"])
+        msg = f"Generando meme (texto manual en {pos})."
+        if pos == "top":
+            return custom_text, "", msg
+        return "", custom_text, msg
+
+    def _update_ui_image(self, pil_image: Image.Image):
+        """Redimensiona y actualiza la imagen en el hilo principal."""
+        # Clonamos para no afectar el render original si se fuera a guardar (futuro)
+        display_img = pil_image.copy()
+        display_img.thumbnail(PREVIEW_SIZE, Image.LANCZOS)
+
+        ctk_image = ctk.CTkImage(light_image=display_img, size=display_img.size)
+        self._current_ctk_image = ctk_image
+        self.canvas.configure(image=ctk_image, text="")
+
+    # --- Callbacks de Botones ---
+
+    def _on_test_api(self):
+        self._set_status("Comprobando conexión...", info=True)
         self._set_buttons_state(False)
-        thread = threading.Thread(target=self._test_api_thread, daemon=True)
-        thread.start()
+        threading.Thread(target=self._test_api_thread, daemon=True).start()
+
+    def _on_generate_meme(self):
+        self._set_status("Iniciando generación...", info=True)
+        self._set_buttons_state(False)
+        threading.Thread(target=self._generate_meme_thread, daemon=True).start()
+
+    # --- Hilos de Trabajo ---
 
     def _test_api_thread(self):
-
         try:
-            meme_url = get_random_meme_url()
-            if not meme_url:
-                raise RuntimeError("No se obtuvo URL de plantilla desde Imgflip.")
-
-
-            resp = requests.get(meme_url, timeout=12, stream=True)
-            resp.raise_for_status()
-
-
-            content_length = resp.headers.get("Content-Length")
-            if content_length and int(content_length) > 12 * 1024 * 1024:
-                raise RuntimeError("Imagen demasiado grande (>12MB).")
-
-            img_bytes = resp.content
-            image = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-
-
-            max_w, max_h = 900, 900
-            image.thumbnail((max_w, max_h), Image.LANCZOS)
-
-
-            ctk_image = ctk.CTkImage(light_image=image, size=image.size)
-            self._current_ctk_image = ctk_image
-
-
-            self.after(0, lambda: self._show_ctk_image(ctk_image))
-            self.after(0, lambda: self._set_status("Plantilla descargada correctamente.", success=True))
-            logger.info("Prueba API exitosa: %s", meme_url)
+            image, url = self._download_template()
+            self.after(0, lambda: self._update_ui_image(image))
+            self.after(0, lambda: self._set_status("Plantilla descargada OK.", success=True))
+            logger.info("Test API exitoso: %s", url)
         except Exception as e:
-            tb = traceback.format_exc()
-            logger.exception("Error en prueba API")
-            self.after(0, lambda: self._set_status(f"Error prueba API: {str(e)}", error=True))
-            print(tb)
+            self._handle_error("Error prueba API", e)
         finally:
             self.after(0, lambda: self._set_buttons_state(True))
 
-    def _on_generate_meme(self):
-        """Callback para generar meme: descarga plantilla, renderiza y muestra."""
-        self._set_status("Generando meme...", info=True)
-        self._set_buttons_state(False)
-        thread = threading.Thread(target=self._generate_meme_thread, daemon=True)
-        thread.start()
-
     def _generate_meme_thread(self):
-        """Hilo que realiza la descarga de plantilla, render y actualización UI."""
         try:
-            meme_url = get_random_meme_url()
-            if not meme_url:
-                raise RuntimeError("No se obtuvo URL de plantilla desde Imgflip.")
 
-            # Descargar imagen en memoria con timeout y manejo de errores
-            resp = requests.get(meme_url, timeout=15, stream=True)
-            resp.raise_for_status()
-
-            content_length = resp.headers.get("Content-Length")
-            if content_length and int(content_length) > 12 * 1024 * 1024:
-                raise RuntimeError("Imagen demasiado grande (>12MB).")
-
-            img_bytes = resp.content
-            image = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+            image, url = self._download_template()
 
 
-            top_text = ""
-            bottom_text = ""
+            top, bottom, status_msg = self._resolve_text_placement()
+            self.after(0, lambda: self._set_status(status_msg, info=True))
 
-            if self.use_random_var.get():
-                # Obtener una sola frase del pool
-                phrase = get_random_phrase()
-                # Elegir aleatoriamente si va arriba o abajo
-                position = random.choice(["top", "bottom"])
-                if position == "top":
-                    top_text = phrase
-                else:
-                    bottom_text = phrase
 
-                self.after(0, lambda pos=position: self._set_status(f"Generando meme (frase en {pos}).", info=True))
-            else:
-                # Texto personalizado: si contiene '|', respetar top|bottom
-                custom = (self.entry_custom.get() or "").strip()
-                if "|" in custom:
-                    top_text, bottom_text = [s.strip() for s in custom.split("|", 1)]
-                else:
-                    # Si solo hay un texto personalizado, colocarlo en posición aleatoria
-                    phrase = custom
-                    if phrase:
-                        position = random.choice(["top", "bottom"])
-                        if position == "top":
-                            top_text = phrase
-                        else:
-                            bottom_text = phrase
-                        self.after(0, lambda pos=position: self._set_status(f"Generando meme (texto personalizado en {pos}).", info=True))
-                    else:
-                        # Si no hay texto personalizado, dejar ambos vacíos
-                        top_text = ""
-                        bottom_text = ""
-
-            # Renderizar meme (usar parámetros compatibles con renderer actualizado)
             rendered = render_meme(
                 image,
-                top_text=top_text,
-                bottom_text=bottom_text,
-                font_size=None,  # dejar que renderer calcule según base_font_ratio
+                top_text=top,
+                bottom_text=bottom,
                 base_font_ratio=0.06,
                 max_text_height_ratio=0.35,
                 padding_ratio=0.02,
                 stroke_width_ratio=0.06,
             )
 
-            # Redimensionar para vista previa si es muy grande
-            max_w, max_h = 900, 900
-            rendered.thumbnail((max_w, max_h), Image.LANCZOS)
 
-            # Crear CTkImage para mostrar en la GUI (evita advertencias HighDPI)
-            ctk_image = ctk.CTkImage(light_image=rendered, size=rendered.size)
-            self._current_ctk_image = ctk_image
-
-            self.after(0, lambda: self._show_ctk_image(ctk_image))
+            self.after(0, lambda: self._update_ui_image(rendered))
             self.after(0, lambda: self._set_status("Meme generado correctamente.", success=True))
-            logger.info("Meme generado desde: %s", meme_url)
+            logger.info("Meme generado: %s", url)
         except Exception as e:
-            tb = traceback.format_exc()
-            logger.exception("Error generando meme")
-            self.after(0, lambda: self._set_status(f"Error generando meme: {str(e)}", error=True))
-            print(tb)
+            self._handle_error("Error generando meme", e)
         finally:
             self.after(0, lambda: self._set_buttons_state(True))
 
-    def _show_ctk_image(self, ctk_image: ctk.CTkImage):
-        """Muestra la CTkImage en el panel derecho."""
-        self.canvas.configure(image=ctk_image, text="")
+
+
+    def _handle_error(self, context: str, e: Exception):
+        tb = traceback.format_exc()
+        logger.exception(context)
+        print(tb)
+        self.after(0, lambda: self._set_status(f"{context}: {str(e)}", error=True))
 
     def _set_buttons_state(self, enabled: bool):
         state = "normal" if enabled else "disabled"
@@ -371,14 +345,7 @@ class MemeApp(ctk.CTk):
         self.entry_custom.configure(state=state)
 
     def _set_status(self, message: str, info: bool = False, success: bool = False, error: bool = False):
-
-        prefix = ""
-        if success:
-            prefix = "OK: "
-        elif error:
-            prefix = "ERROR: "
-        elif info:
-            prefix = "INFO: "
+        prefix = "OK: " if success else "ERROR: " if error else "INFO: " if info else ""
         self.lbl_status.configure(text=f"Estado: {prefix}{message}")
 
     def run(self):
@@ -386,14 +353,8 @@ class MemeApp(ctk.CTk):
 
 
 def _print_startup_instructions():
-    print("\nMemeScript-Py - Instrucciones rápidas de prueba")
-    print("1) Asegúrate de tener un entorno virtual y dependencias instaladas:")
-    print("   python -m venv .venv && source .venv/bin/activate  # o .venv\\Scripts\\activate en Windows")
-    print("   pip install -r requirements.txt")
-    print("2) Ejecuta desde la raíz del repo: python -m src.main  (o python src/main.py)")
-    print("3) En la ventana: pulsa 'Probar conexión Imgflip' y luego 'Generar meme'.")
-    print("4) Si algo falla, copia el texto del estado y pégalo como feedback.\n")
-
+    print("\n--- MemeScript-Py (Optimized) ---")
+    print("Ejecuta desde la raíz: python -m src.main")
 
 if __name__ == "__main__":
     _print_startup_instructions()
@@ -405,128 +366,109 @@ if __name__ == "__main__":
 from __future__ import annotations
 
 import math
-import textwrap
+import tempfile
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Final, Union, Any
 
 from PIL import Image, ImageDraw, ImageFont
 
 
-DEFAULT_FONT_SIZE = 48
-MIN_FONT_SIZE = 12
-MAX_IMAGE_PIXELS = 5000 * 5000
-MAX_DIMENSION = 4000
-DEFAULT_FONT_PATHS: List[Path] = [
+
+try:
+    from PIL.Image import Resampling
+    LANCZOS: Any = Resampling.LANCZOS
+    BICUBIC: Any = Resampling.BICUBIC
+except (ImportError, AttributeError):
+
+    LANCZOS = getattr(Image, "LANCZOS", getattr(Image, "BILINEAR", 2))
+    BICUBIC = getattr(Image, "BICUBIC", getattr(Image, "BILINEAR", 3))
+
+from PIL.ImageDraw import ImageDraw as PILImageDraw
+
+
+AnyFont = Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]
+
+
+MIN_FONT_SIZE: Final[int] = 12
+MAX_IMAGE_PIXELS: Final[int] = 5000 * 5000
+MAX_DIMENSION: Final[int] = 4000
+DEFAULT_FONT_PATHS: Final[List[Path]] = [
     Path(__file__).parent / "assets" / "fonts" / "impact.ttf",
-    Path(__file__).parent / "assets" / "fonts" / "Impact.ttf",
     Path("/usr/share/fonts/truetype/impact/impact.ttf"),
     Path("/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"),
 ]
 
+def _safe_load_font(font_path: Optional[str | Path], size: int) -> AnyFont:
 
-def _safe_load_font(font_path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
-
-
-
-
-    candidates: List[Path] = []
-    if font_path:
-        candidates.append(Path(font_path))
-    candidates.extend([p for p in DEFAULT_FONT_PATHS if p is not None])
+    candidates: List[Path] = [Path(font_path)] if font_path else []
+    candidates.extend(DEFAULT_FONT_PATHS)
 
     for p in candidates:
-        try:
-            if p and p.exists():
-                return ImageFont.truetype(str(p), size=size)
-        except Exception:
-            continue
+        if p.exists():
+            try:
 
-
+                return ImageFont.truetype(str(p), size=int(size))
+            except (OSError, ValueError):
+                continue
     try:
-        return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
+        return ImageFont.truetype("DejaVuSans-Bold.ttf", size=int(size))
     except Exception:
-
         return ImageFont.load_default()
-
 
 def _reduce_image_if_needed(image: Image.Image, max_dim: int = MAX_DIMENSION) -> Image.Image:
 
-
-
-
     w, h = image.size
+    scale: float = 1.0
+
     if w > max_dim or h > max_dim:
         scale = min(max_dim / w, max_dim / h)
-        new_w = max(1, int(w * scale))
-        new_h = max(1, int(h * scale))
-        return image.resize((new_w, new_h), Image.LANCZOS)
-
-    if w * h > MAX_IMAGE_PIXELS:
+    elif w * h > MAX_IMAGE_PIXELS:
         scale = math.sqrt(MAX_IMAGE_PIXELS / (w * h))
+
+    if scale < 1.0:
         new_w = max(1, int(w * scale))
         new_h = max(1, int(h * scale))
-        return image.resize((new_w, new_h), Image.LANCZOS)
+
+        return image.resize((new_w, new_h), resample=LANCZOS)
     return image
 
+def _get_text_size(draw: PILImageDraw, text: str, font: AnyFont) -> Tuple[int, int]:
 
-def _wrap_text_for_width(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+    bbox = draw.textbbox((0, 0), str(text), font=font)
+    return int(bbox[2] - bbox[0]), int(bbox[3] - bbox[1])
 
-
-
+def _wrap_text_for_width(text: str, draw: PILImageDraw, font: AnyFont, max_width: int) -> List[str]:
 
     if not text:
         return []
-
-    text = " ".join(text.split())
-    words = text.split(" ")
+    words = str(text).split()
     lines: List[str] = []
-    current = ""
-    for w in words:
-        test = f"{current} {w}".strip()
-        bbox = draw.textbbox((0, 0), test, font=font)
-        width = bbox[2] - bbox[0]
-        if width <= max_width or not current:
-            current = test
+    current_line = ""
+    for word in words:
+        test_line = f"{current_line} {word}".strip()
+        width, _ = _get_text_size(draw, test_line, font)
+        if width <= max_width:
+            current_line = test_line
         else:
-            lines.append(current)
-            current = w
-    if current:
-        lines.append(current)
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+    if current_line:
+        lines.append(current_line)
+    return lines
 
-    # Si alguna línea aún es demasiado larga (palabra larga), usar textwrap con estimación
-    final_lines: List[str] = []
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        if bbox[2] - bbox[0] <= max_width:
-            final_lines.append(line)
-        else:
-            avg_char_w = (bbox[2] - bbox[0]) / max(1, len(line))
-            if avg_char_w <= 0:
-                final_lines.append(line)
-            else:
-                est_chars = max(1, int(max_width / avg_char_w))
-                wrapped = textwrap.wrap(line, width=est_chars)
-                final_lines.extend(wrapped if wrapped else [line])
-    return final_lines
-
-
-def _draw_text_with_stroke(draw: ImageDraw.ImageDraw, pos: Tuple[int, int], text: str, font: ImageFont.FreeTypeFont,
-                           fill: str, stroke_width: int, stroke_fill: str) -> None:
-    """
-    Dibuja texto con contorno. Usa stroke_width/stroke_fill si la versión de Pillow lo soporta,
-    si no, hace un fallback dibujando el texto desplazado en 8 direcciones.
-    """
-    try:
-        draw.text(pos, text, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke_fill)
-    except TypeError:
-        x, y = pos
-        offsets = [(-stroke_width, -stroke_width), (-stroke_width, 0), (-stroke_width, stroke_width),
-                   (0, -stroke_width), (0, stroke_width),
-                   (stroke_width, -stroke_width), (stroke_width, 0), (stroke_width, stroke_width)]
-        for dx, dy in offsets:
-            draw.text((x + dx, y + dy), text, font=font, fill=stroke_fill)
-        draw.text(pos, text, font=font, fill=fill)
-
+def _draw_text_with_stroke(draw: PILImageDraw, pos: Tuple[int, int], text: str,
+                           font: AnyFont, fill: str,
+                           stroke_width: int, stroke_fill: str) -> None:
+    """Dibuja texto con contorno (stroke) garantizando tipos enteros."""
+    draw.text(
+        (int(pos[0]), int(pos[1])),
+        str(text),
+        font=font,
+        fill=fill,
+        stroke_width=int(stroke_width),
+        stroke_fill=stroke_fill
+    )
 
 def render_meme(image: Image.Image,
                 top_text: str = "",
@@ -544,162 +486,68 @@ def render_meme(image: Image.Image,
 
 
 
-
-
-
-
-
-
-
-
     if image is None:
-        raise ValueError("image no puede ser None")
+        raise ValueError("Imagen de entrada inválida.")
 
     img = image.convert("RGBA")
     img = _reduce_image_if_needed(img)
-
     w, h = img.size
     draw = ImageDraw.Draw(img)
 
-    max_text_width = max(10, int(w * max_width_ratio))
-    padding = max(4, int(min(w, h) * padding_ratio))
+    max_text_width = int(w * max_width_ratio)
+    padding = int(min(w, h) * padding_ratio)
+    allowed_total_h = int(h * max_text_height_ratio)
 
-    if font_size and font_size > 0:
-        initial_font_size = int(font_size)
-    else:
-        initial_font_size = max(min_font_size, int(h * base_font_ratio))
 
-    def _measure_block_height(lines: List[str], font: ImageFont.FreeTypeFont, line_spacing: float = 1.05) -> int:
-        if not lines:
-            return 0
-        total = 0
+    current_size = int(font_size) if font_size else int(h * base_font_ratio)
+    current_size = max(min_font_size, current_size)
+
+    font = _safe_load_font(font_path, current_size)
+
+
+    while current_size > min_font_size:
+        font = _safe_load_font(font_path, current_size)
+        t_lines = _wrap_text_for_width(top_text, draw, font, max_text_width - (2 * padding))
+        b_lines = _wrap_text_for_width(bottom_text, draw, font, max_text_width - (2 * padding))
+
+        total_h = 0
+        for line in t_lines + b_lines:
+            _, lh = _get_text_size(draw, line, font)
+            total_h += int(lh * 1.1)
+
+        if total_h <= allowed_total_h:
+            break
+        current_size -= 2
+
+
+    final_top = _wrap_text_for_width(top_text, draw, font, max_text_width - (2 * padding))
+    final_bot = _wrap_text_for_width(bottom_text, draw, font, max_text_width - (2 * padding))
+    stroke_w = max(1, int(current_size * stroke_width_ratio))
+
+    def draw_lines(lines: List[str], top_aligned: bool):
+        if not lines: return
+        curr_y: int
+        if top_aligned:
+            curr_y = padding
+        else:
+            block_h = sum(int(_get_text_size(draw, ln, font)[1] * 1.1) for ln in lines)
+            curr_y = h - block_h - padding
+
         for ln in lines:
-            bbox = draw.textbbox((0, 0), ln, font=font)
-            line_h = bbox[3] - bbox[1]
-            total += int(line_h * line_spacing)
-        return total
+            lw, lh = _get_text_size(draw, ln, font)
+            _draw_text_with_stroke(draw, ((w - lw) // 2, curr_y), ln, font, text_fill, stroke_w, stroke_fill)
+            curr_y += int(lh * 1.1)
 
-    def _truncate_line_to_width(line: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
-        if not line:
-            return line
-        bbox = draw.textbbox((0, 0), line, font=font)
-        if bbox[2] - bbox[0] <= max_w:
-            return line
-        ellipsis = "…"
-        low, high = 0, len(line)
-        best = ""
-        last_bbox = bbox
-        while low <= high:
-            mid = (low + high) // 2
-            candidate = line[:mid].rstrip() + ellipsis
-            last_bbox = draw.textbbox((0, 0), candidate, font=font)
-            if last_bbox[2] - last_bbox[0] <= max_w:
-                best = candidate
-                low = mid + 1
-            else:
-                high = mid - 1
-        if best:
-            return best
-        # Fallback: approximate truncation
-        avg_char_w = (last_bbox[2] - last_bbox[0]) / max(1, len(line))
-        est_chars = max(1, int(max_w / avg_char_w)) if avg_char_w > 0 else max(1, len(line) // 2)
-        return line[:est_chars].rstrip() + ellipsis
-
-    def _shrink_lines_to_height(lines: List[str], font: ImageFont.FreeTypeFont, allowed_h: int, max_w: int) -> List[str]:
-        if _measure_block_height(lines, font) <= allowed_h:
-            return lines
-        new_lines = [_truncate_line_to_width(ln, font, max_w) for ln in lines]
-        # Combinar líneas hasta que quepa
-        while _measure_block_height(new_lines, font) > allowed_h and len(new_lines) > 1:
-            a = new_lines[-2]
-            b = new_lines[-1]
-            combined = (a + " " + b).strip()
-            combined = _truncate_line_to_width(combined, font, max_w)
-            new_lines = new_lines[:-2] + [combined]
-        if _measure_block_height(new_lines, font) > allowed_h and len(new_lines) == 1:
-            new_lines = [_truncate_line_to_width(new_lines[0], font, max_w)]
-        return new_lines
-
-    def _fit_font_and_lines(top: str, bottom: str, start_size: int) -> Tuple[ImageFont.FreeTypeFont, int, List[str], List[str]]:
-        size = start_size
-        allowed_total_h = max(10, int(h * max_text_height_ratio))
-        while size >= min_font_size:
-            f = _safe_load_font(font_path, size=size)
-            top_lines = _wrap_text_for_width(top, draw, f, max_text_width - 2 * padding)
-            bottom_lines = _wrap_text_for_width(bottom, draw, f, max_text_width - 2 * padding)
-            top_h = _measure_block_height(top_lines, f)
-            bottom_h = _measure_block_height(bottom_lines, f)
-            total_h = top_h + bottom_h + 2 * padding
-            if total_h <= allowed_total_h or size == min_font_size:
-                # Truncar líneas si alguna excede ancho o altura permitida
-                top_lines = _shrink_lines_to_height(top_lines, f, max(0, allowed_total_h - bottom_h - padding), max_text_width - 2 * padding)
-                bottom_lines = _shrink_lines_to_height(bottom_lines, f, max(0, allowed_total_h - top_h - padding), max_text_width - 2 * padding)
-                return f, size, top_lines, bottom_lines
-            size = max(min_font_size, size - 2)
-            if size == min_font_size:
-                f = _safe_load_font(font_path, size=size)
-                top_lines = _wrap_text_for_width(top, draw, f, max_text_width - 2 * padding)
-                bottom_lines = _wrap_text_for_width(bottom, draw, f, max_text_width - 2 * padding)
-                top_lines = _shrink_lines_to_height(top_lines, f, max(0, allowed_total_h - _measure_block_height(bottom_lines, f) - padding), max_text_width - 2 * padding)
-                bottom_lines = _shrink_lines_to_height(bottom_lines, f, max(0, allowed_total_h - _measure_block_height(top_lines, f) - padding), max_text_width - 2 * padding)
-                return f, size, top_lines, bottom_lines
-        f = _safe_load_font(font_path, size=min_font_size)
-        top_lines = _wrap_text_for_width(top, draw, f, max_text_width - 2 * padding)
-        bottom_lines = _wrap_text_for_width(bottom, draw, f, max_text_width - 2 * padding)
-        top_lines = _shrink_lines_to_height(top_lines, f, int(h * max_text_height_ratio / 2), max_text_width - 2 * padding)
-        bottom_lines = _shrink_lines_to_height(bottom_lines, f, int(h * max_text_height_ratio / 2), max_text_width - 2 * padding)
-        return f, min_font_size, top_lines, bottom_lines
-
-    font, used_font_size, top_lines, bottom_lines = _fit_font_and_lines(top_text, bottom_text, initial_font_size)
-    stroke_width = max(1, int(max(1, used_font_size * stroke_width_ratio)))
-
-    def _block_height(lines: List[str], font: ImageFont.FreeTypeFont, line_spacing: float = 1.05) -> int:
-        return _measure_block_height(lines, font, line_spacing)
-
-    top_block_h = _block_height(top_lines, font)
-    bottom_block_h = _block_height(bottom_lines, font)
-
-    # Dibujar top lines (asegurando límites)
-    y = padding
-    for ln in top_lines:
-        bbox = draw.textbbox((0, 0), ln, font=font)
-        line_w = bbox[2] - bbox[0]
-        line_h = bbox[3] - bbox[1]
-        x = max(0, (w - line_w) // 2)
-        if y + line_h > h - padding:
-            break
-        _draw_text_with_stroke(draw, (x, y), ln, font, fill=text_fill, stroke_width=stroke_width, stroke_fill=stroke_fill)
-        y += int(line_h * 1.05)
-
-    # Dibujar bottom lines (desde abajo hacia arriba), evitando solapamientos
-    y_bottom_start = h - bottom_block_h - padding
-    if y_bottom_start < y + padding:
-        y_bottom_start = max(y + padding, padding)
-    y = y_bottom_start
-    for ln in bottom_lines:
-        bbox = draw.textbbox((0, 0), ln, font=font)
-        line_w = bbox[2] - bbox[0]
-        line_h = bbox[3] - bbox[1]
-        x = max(0, (w - line_w) // 2)
-        if y + line_h > h - padding:
-            break
-        _draw_text_with_stroke(draw, (x, y), ln, font, fill=text_fill, stroke_width=stroke_width, stroke_fill=stroke_fill)
-        y += int(line_h * 1.05)
+    draw_lines(final_top, True)
+    draw_lines(final_bot, False)
 
     return img
 
-
-# Demo rápido si se ejecuta como script
 if __name__ == "__main__":
-    import tempfile
 
-    demo_img = Image.new("RGB", (800, 600), color=(60, 60, 60))
-    top = "CUANDO EL CÓDIGO COMPILA"
-    bottom = "Y NADIE SABE POR QUÉ"
-    out = render_meme(demo_img, top, bottom, font_path=None, font_size=None, base_font_ratio=0.06, max_text_height_ratio=0.35, padding_ratio=0.02, stroke_width_ratio=0.06)
-    tmp = Path(tempfile.gettempdir()) / "meme_demo_output.png"
-    out.convert("RGB").save(tmp)
-    print(f"Meme demo guardado en: {tmp}")
+    test_img = Image.new("RGB", (800, 600), color=(50, 50, 50))
+    render_meme(test_img, "SISTEMA OPERATIVO", "CÓDIGO LIMPIO")
+    print("Módulo renderer.py verificado.")
 </file>
 
 <file path="src/text_pool.py">

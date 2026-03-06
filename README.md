@@ -15,7 +15,7 @@
 ## 🚀 Instalación Rápida
 
 1. Clonar el repositorio:
-   git clone https://github.com/tu-usuario/memescript-py.git
+   git clone https://github.com/AlejandroGlezSan/MemeScript-Py
    cd memescript-py
 
 2. Crear y activar entorno virtual:

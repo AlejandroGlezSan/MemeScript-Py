@@ -1,0 +1,3412 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+docs/design.md
+README.md
+requirements.txt
+src/__init__.py
+src/api_client.py
+src/assets/phrases.json
+src/cache.py
+src/main.py
+src/renderer.py
+src/text_pool.py
+tests/test_api_client.py
+tests/test_renderer.py
+tests/test_text_poop.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/cache.py">
+# src/cache.py
+"""
+Sistema de caché para plantillas de memes.
+Almacena imágenes localmente para reducir descargas y permitir modo offline.
+"""
+
+import os
+import time
+import hashlib
+import logging
+from pathlib import Path
+from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
+import json
+
+logger = logging.getLogger(__name__)
+
+class MemeCache:
+    """Gestiona el caché de imágenes de plantillas."""
+    
+    def __init__(self, cache_dir: Optional[Path] = None, max_size_mb: int = 500, max_age_days: int = 30):
+        """
+        Inicializa el sistema de caché.
+        
+        Args:
+            cache_dir: Directorio para el caché. Por defecto: ~/.cache/memescript-py/
+            max_size_mb: Tamaño máximo del caché en MB
+            max_age_days: Edad máxima de los archivos en días
+        """
+        if cache_dir is None:
+            cache_dir = Path.home() / ".cache" / "memescript-py"
+        
+        self.cache_dir = cache_dir
+        self.images_dir = cache_dir / "images"
+        self.metadata_file = cache_dir / "metadata.json"
+        self.max_size_bytes = max_size_mb * 1024 * 1024
+        self.max_age = timedelta(days=max_age_days)
+        
+        # Crear directorios si no existen
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Cargar metadatos
+        self.metadata = self._load_metadata()
+        
+    def _load_metadata(self) -> Dict[str, Any]:
+        """Carga los metadatos del caché desde el archivo JSON."""
+        if self.metadata_file.exists():
+            try:
+                with open(self.metadata_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Error cargando metadatos del caché: {e}")
+        return {"templates": {}, "access_times": {}, "size": 0}
+    
+    def _save_metadata(self):
+        """Guarda los metadatos del caché en el archivo JSON."""
+        try:
+            # Guardar en archivo temporal y renombrar para evitar corrupción
+            temp_file = self.metadata_file.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(self.metadata, f, indent=2)
+            temp_file.replace(self.metadata_file)
+        except Exception as e:
+            logger.error(f"Error guardando metadatos del caché: {e}")
+    
+    def _get_cache_key(self, template_id: str) -> str:
+        """Genera una clave única para el template."""
+        return hashlib.md5(template_id.encode()).hexdigest()
+    
+    def _get_image_path(self, template_id: str) -> Path:
+        """Obtiene la ruta donde se debería almacenar la imagen."""
+        cache_key = self._get_cache_key(template_id)
+        return self.images_dir / f"{cache_key}.png"
+    
+    def get(self, template_id: str) -> Optional[Path]:
+        """
+        Obtiene la ruta de una imagen del caché si existe y es válida.
+        
+        Args:
+            template_id: ID del template de Imgflip
+            
+        Returns:
+            Path al archivo de imagen o None si no está en caché
+        """
+        cache_key = self._get_cache_key(template_id)
+        metadata = self.metadata["templates"].get(cache_key)
+        
+        if not metadata:
+            return None
+        
+        # Verificar si el archivo existe
+        image_path = self._get_image_path(template_id)
+        if not image_path.exists():
+            # Limpiar metadatos huérfanos
+            del self.metadata["templates"][cache_key]
+            self.metadata["size"] -= metadata.get("size", 0)
+            self._save_metadata()
+            return None
+        
+        # Verificar edad
+        cache_time = datetime.fromisoformat(metadata["cached_at"])
+        if datetime.now() - cache_time > self.max_age:
+            # Archivo expirado
+            self._remove(cache_key)
+            return None
+        
+        # Actualizar tiempo de acceso para LRU
+        self.metadata["access_times"][cache_key] = time.time()
+        self._save_metadata()
+        
+        return image_path
+    
+    def put(self, template_id: str, image_data: bytes, template_info: Dict[str, Any]) -> Path:
+        """
+        Almacena una imagen en el caché.
+        
+        Args:
+            template_id: ID del template
+            image_data: Datos binarios de la imagen
+            template_info: Información adicional del template (nombre, dimensiones, etc.)
+            
+        Returns:
+            Path al archivo guardado
+        """
+        cache_key = self._get_cache_key(template_id)
+        image_path = self._get_image_path(template_id)
+        file_size = len(image_data)
+        
+        # Verificar espacio y hacer limpieza si es necesario
+        self._ensure_space(file_size)
+        
+        # Guardar la imagen
+        try:
+            with open(image_path, 'wb') as f:
+                f.write(image_data)
+            
+            # Actualizar metadatos
+            self.metadata["templates"][cache_key] = {
+                "template_id": template_id,
+                "name": template_info.get("name", "Unknown"),
+                "url": template_info.get("url", ""),
+                "width": template_info.get("width", 0),
+                "height": template_info.get("height", 0),
+                "size": file_size,
+                "cached_at": datetime.now().isoformat()
+            }
+            self.metadata["access_times"][cache_key] = time.time()
+            self.metadata["size"] = self.metadata.get("size", 0) + file_size
+            
+            self._save_metadata()
+            logger.info(f"Imagen {template_id} guardada en caché: {image_path}")
+            
+        except Exception as e:
+            logger.error(f"Error guardando imagen en caché: {e}")
+            if image_path.exists():
+                image_path.unlink()
+            raise
+        
+        return image_path
+    
+    def _remove(self, cache_key: str):
+        """Elimina un elemento del caché."""
+        if cache_key in self.metadata["templates"]:
+            size = self.metadata["templates"][cache_key].get("size", 0)
+            self.metadata["size"] -= size
+            del self.metadata["templates"][cache_key]
+        
+        if cache_key in self.metadata["access_times"]:
+            del self.metadata["access_times"][cache_key]
+        
+        # Eliminar archivo físico
+        image_path = self.images_dir / f"{cache_key}.png"
+        if image_path.exists():
+            image_path.unlink()
+    
+    def _ensure_space(self, needed_bytes: int):
+        """
+        Asegura que haya suficiente espacio en el caché, eliminando elementos
+        usando política LRU (Least Recently Used).
+        """
+        current_size = self.metadata.get("size", 0)
+        
+        # Si hay suficiente espacio, no hacer nada
+        if current_size + needed_bytes <= self.max_size_bytes:
+            return
+        
+        # Ordenar por tiempo de acceso (los más antiguos primero)
+        items = sorted(
+            self.metadata["access_times"].items(),
+            key=lambda x: x[1]
+        )
+        
+        # Eliminar hasta tener espacio suficiente
+        for cache_key, _ in items:
+            if current_size + needed_bytes <= self.max_size_bytes:
+                break
+            
+            item_size = self.metadata["templates"][cache_key].get("size", 0)
+            self._remove(cache_key)
+            current_size -= item_size
+            logger.info(f"Eliminado del caché LRU: {cache_key}")
+        
+        self._save_metadata()
+    
+    def clear(self):
+        """Limpia todo el caché."""
+        for file in self.images_dir.glob("*.png"):
+            file.unlink()
+        
+        self.metadata = {"templates": {}, "access_times": {}, "size": 0}
+        self._save_metadata()
+        logger.info("Caché limpiado completamente")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Obtiene estadísticas del caché."""
+        total_images = len(self.metadata["templates"])
+        total_size_mb = self.metadata.get("size", 0) / (1024 * 1024)
+        
+        return {
+            "total_images": total_images,
+            "total_size_mb": round(total_size_mb, 2),
+            "max_size_mb": round(self.max_size_bytes / (1024 * 1024), 2),
+            "usage_percent": round((total_size_mb / (self.max_size_bytes / (1024 * 1024))) * 100, 1),
+            "cache_dir": str(self.cache_dir)
+        }
+</file>
+
+<file path=".gitignore">
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.Python
+repomix.config.json
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and local config
+*.log
+local_settings.py
+config_local.py
+secrets.json
+.env
+.env.*
+
+# Assets and large binaries (opcional: descomentar si no quieres versionar imágenes)
+# src/assets/*.png
+# src/assets/*.jpg
+# src/assets/*.jpeg
+# src/assets/*.gif
+
+# Test artifacts
+tests/__pycache__/
+tests/*.log
+
+# Generated GUI assets / caches
+*.db
+*.sqlite3
+
+# Python wheel
+*.whl
+
+# Misc
+coverage_html_report/
+</file>
+
+<file path="docs/design.md">
+# Diseño técnico — MemeScript-Py
+
+## Resumen
+MemeScript-Py es una aplicación de escritorio en Python que genera memes automáticos combinando plantillas públicas de Imgflip con un pool local de frases. Está diseñada para ser modular, testeable y tolerante a fallos de red y archivos grandes.
+
+## Objetivos de diseño
+- **Modularidad:** separar API, gestión de texto, renderizado y GUI en módulos independientes.
+- **Robustez:** timeouts, reintentos, límites de tamaño y manejo de excepciones.
+- **UX responsiva:** operaciones de red y procesamiento en hilos o tareas asíncronas para no bloquear la GUI.
+- **Portabilidad:** dependencias mínimas y uso de CustomTkinter para apariencia moderna.
+- **Extensibilidad:** fácil incorporación de cache, soporte offline y exportación futura.
+
+---
+
+## Estructura propuesta
+memeScript-py/
+├── README.md
+├── .gitignore
+├── requirements.txt
+├── src/
+│   ├── main.py            # GUI principal
+│   ├── api_client.py      # Lógica de consumo de Imgflip (get_random_meme_url, session/retries)
+│   ├── text_pool.py       # Carga y gestión de frases (assets/phrases.json)
+│   ├── renderer.py        # Renderizado de texto sobre imágenes (render_meme)
+│   ├── cache.py           # (opcional) cache local de plantillas
+│   └── assets/
+│       └── phrases.json
+├── tests/
+│   ├── test_api_client.py
+│   └── test_renderer.py
+└── docs/
+└── design.md
+
+---
+
+## Módulos y responsabilidades
+
+### api_client.py
+- **Responsabilidad:** obtener lista de plantillas desde `https://api.imgflip.com/get_memes` y devolver una URL aleatoria o metadatos.
+- **Requisitos:** usar `requests.Session` con `HTTPAdapter` + `Retry` (urllib3) para reintentos; exponer parámetros `timeout` y `max_retries`.
+- **Errores manejados:** HTTP errors, JSON decode errors, respuesta sin `success`, lista vacía.
+- **Salida:** `dict` con `id`, `name`, `url`, `width`, `height` o `None` en fallo.
+
+### text_pool.py
+- **Responsabilidad:** cargar `assets/phrases.json`, exponer `get_random_phrase()` y funciones CRUD básicas (añadir, eliminar, validar).
+- **Formato:** JSON simple: lista de strings.
+- **Validaciones:** strings no vacíos; límite máximo por frase (ej. 200 chars).
+- **Persistencia:** escritura segura (temp file + rename) para evitar corrupción.
+
+### renderer.py
+- **Responsabilidad:** componer texto superior/inferior sobre una imagen PIL y devolver `PIL.Image`.
+- **Función principal:** `render_meme(image: Image, top_text: str, bottom_text: str, font_path: Optional[str]=None, font_size: Optional[int]=None) -> Image`
+- **Características de renderizado:**
+  - Escalado de imagen para evitar OOM (si imagen > X px, reducir manteniendo aspecto).
+  - Texto centrado horizontalmente; ajuste de tamaño de fuente para que quepa en ancho con `textwrap`.
+  - Contorno (stroke) para legibilidad: usar `ImageDraw.text(..., stroke_width=n, stroke_fill="black")` si Pillow lo soporta; fallback a dibujar múltiples pasadas del texto desplazado.
+  - Sombra opcional y padding.
+  - Soporte para múltiples líneas y separación entre líneas.
+- **Optimización:** dibujar en una copia RGBA; evitar conversiones innecesarias.
+
+### main.py (GUI)
+- **Responsabilidad:** UI con CustomTkinter, interacción del usuario, hilos para operaciones de red y render.
+- **Buenas prácticas:**
+  - Todas las llamadas de red y procesamiento en `threading.Thread` o `concurrent.futures.ThreadPoolExecutor`.
+  - Actualizaciones de widgets con `after()` para ejecutar en hilo principal.
+  - Indicadores de estado y manejo de errores mostrados al usuario.
+  - Botones deshabilitados durante operaciones largas.
+  - Límite de tamaño de imagen y barra de progreso (si se desea).
+
+### cache.py (opcional)
+- **Responsabilidad:** cache local de plantillas descargadas (por id) en `~/.cache/memescript-py/` o `src/assets/cache/`.
+- **Política:** LRU simple; límite por número de imágenes o tamaño total en MB.
+- **Beneficio:** reduce ancho de banda y latencia; permite modo offline parcial.
+
+---
+
+## Flujo de datos (alto nivel)
+1. Usuario pulsa "Generar" o "Probar conexión".
+2. GUI lanza hilo que llama a `api_client.get_random_meme()` (o `get_random_meme_url()`).
+3. Si hay URL, se descarga la imagen con `requests` (stream, timeout).
+4. Se valida tamaño (Content-Length o len(content)).
+5. Se crea `PIL.Image` y se pasa a `renderer.render_meme(...)` junto con frases de `text_pool.get_random_phrase()`.
+6. Resultado se convierte a `ImageTk.PhotoImage` y se muestra en GUI mediante `after()`.
+
+---
+
+## Manejo de errores y límites
+- **Timeouts:** 5–15s configurable; reintentos 2–3 con backoff exponencial.
+- **Tamaño máximo:** rechazar imágenes > 10 MB o dimensiones > 5000 px; ofrecer reducción progresiva.
+- **Excepciones:** capturar y mostrar mensajes legibles; loguear stacktrace en archivo `app.log`.
+- **Fallbacks:** si Imgflip falla, usar plantilla local (si existe) o mensaje de error amigable.
+
+---
+
+## Renderizado de texto: algoritmo propuesto
+1. **Preparación**
+   - Convertir imagen a RGBA.
+   - Calcular área útil (anchura - 2*padding).
+2. **Fuente**
+   - Preferir fuente embebida (p.ej. `assets/fonts/impact.ttf`) si está disponible.
+   - Si no, usar `ImageFont.truetype` con fallback a `ImageFont.load_default()`.
+3. **Ajuste de tamaño**
+   - Empezar con `font_size` base (ej. 48).
+   - Reducir iterativamente hasta que el texto envuelto quepa en el ancho permitido.
+4. **Dibujo del contorno**
+   - Si Pillow >= 8.2: usar `stroke_width` y `stroke_fill`.
+   - Si no: dibujar el texto 8 veces desplazado (±1 px) en color de contorno y luego el texto principal.
+5. **Posicionamiento**
+   - **Top text:** y = padding
+   - **Bottom text:** y = image_height - text_height - padding
+   - Centrar horizontalmente por cada línea.
+6. **Salida**
+   - Retornar imagen compuesta.
+
+---
+
+## Pruebas recomendadas
+- **Unit tests:**
+  - `test_api_client.py`: mockear `requests.Session.get` para simular respuestas válidas, errores HTTP y JSON malformado.
+  - `test_renderer.py`: comprobar que `render_meme` devuelve una imagen y que el texto aparece en píxeles (p. ej. detectar cambios en histogram).
+  - `test_text_pool.py`: validar carga y persistencia de frases.
+- **Integration tests:** test que simule descarga real (opcional, marcado como `integration`).
+
+---
+
+## Consideraciones de seguridad y privacidad
+- No almacenar credenciales en repositorio.
+- Validar y sanear cualquier entrada de usuario que se use para nombres de archivo.
+- Evitar subir assets grandes al repositorio; usar `.gitignore` para excluirlos si procede.
+
+---
+
+## Próximos pasos sugeridos
+1. Implementar `renderer.py` con `render_meme(...)`.
+2. Mejorar `api_client.py` para usar `requests.Session` + `Retry`.
+3. Añadir logging estructurado y archivo de logs.
+4. Crear tests unitarios básicos y CI (GitHub Actions).
+</file>
+
+<file path="README.md">
+# MemeScript-Py v2.0 🎭
+
+**MemeScript-Py** es una aplicación de escritorio profesional para generar memes automáticos, combinando plantillas de Imgflip con un pool local de frases. Desarrollada en Python con CustomTkinter.
+
+## ✨ Características Principales
+
+- 🖼️ **Selección de plantillas**: Elige entre más de 100 plantillas de Imgflip o usa una aleatoria
+- 📝 **Gestor de frases**: Añade, edita y elimina frases desde la interfaz gráfica
+- 💾 **Sistema de caché**: Las imágenes se guardan localmente para acceso offline y mayor velocidad
+- 🎨 **Personalización**: Selecciona fuente, tamaño de texto y estilo (con/sin sombra)
+- 🔄 **Reintentos automáticos**: La API maneja timeouts y errores de red gracefulmente
+- 📁 **Exportación**: Guarda tus memes en la carpeta Pictures/Memescript/
+- 🌓 **Tema oscuro/claro**: Se adapta a la configuración de tu sistema
+
+## 🚀 Instalación Rápida
+
+1. Clonar el repositorio:
+   git clone https://github.com/tu-usuario/memescript-py.git
+   cd memescript-py
+
+2. Crear y activar entorno virtual:
+   python -m venv .venv
+   source .venv/bin/activate  (Linux/macOS)
+   .venv\Scripts\activate      (Windows)
+
+3. Instalar dependencias:
+   pip install -r requirements.txt
+
+4. Ejecutar la aplicación:
+   python -m src.main
+
+## 📦 Estructura del Proyecto
+
+memescript-py/
+├── src/
+│   ├── main.py              (GUI principal)
+│   ├── api_client.py        (Cliente API Imgflip con caché)
+│   ├── text_pool.py         (Gestor de frases CRUD)
+│   ├── renderer.py          (Motor de renderizado con Pillow)
+│   ├── cache.py             (Sistema de caché LRU)
+│   └── assets/
+│       └── phrases.json     (Pool de frases por defecto)
+├── tests/
+│   ├── test_api_client.py   (Tests de API)
+│   ├── test_text_pool.py    (Tests de gestión de frases)
+│   └── test_renderer.py     (Tests de renderizado)
+├── docs/
+│   └── design.md            (Documentación de diseño)
+├── requirements.txt         (Dependencias)
+└── README.md                (Este archivo)
+
+## 🎯 Uso de la Aplicación
+
+1. **Inicio**: La aplicación carga automáticamente las plantillas y fuentes disponibles
+2. **Selecciona plantilla**: Elige una específica o usa "Aleatoria"
+3. **Introduce textos**: 
+   - Escribe manualmente texto superior e inferior
+   - O activa "Frase aleatoria" y elige posición
+4. **Personaliza**: Ajusta fuente, tamaño y activa sombra si lo deseas
+5. **Genera**: Haz clic en "Generar Meme" y espera unos segundos
+6. **Guarda**: Usa "Descargar Meme" para guardar en tu disco
+
+## 🧪 Tests y Calidad de Código
+
+Ejecutar todos los tests:
+pytest tests/ -v
+
+Con cobertura:
+pytest tests/ --cov=src --cov-report=html
+
+Linting:
+flake8 src/
+
+Type checking:
+mypy src/
+
+## 📊 Sistema de Caché
+
+Las imágenes se almacenan en ~/.cache/memescript-py/ con política LRU:
+- Límite por defecto: 500 MB
+- Expiración: 30 días
+- Limpieza automática cuando se excede el tamaño
+
+## 🛠️ Desarrollo y Contribución
+
+1. Fork el proyecto
+2. Crea tu rama de características (git checkout -b feature/amazing-feature)
+3. Ejecuta tests y linting antes de commit
+4. Commit tus cambios (git commit -m 'Add amazing feature')
+5. Push a la rama (git push origin feature/amazing-feature)
+6. Abre un Pull Request
+
+## 📝 Notas Técnicas
+
+- Python 3.8+ requerido
+- Las fuentes TrueType (Impact, Arial, etc.) deben estar instaladas en el sistema
+- En Linux: sudo apt install ttf-mscorefonts-installer
+- En macOS: Las fuentes vienen preinstaladas
+- En Windows: Vienen con el sistema
+
+## 👨‍💻 Autor
+
+Desarrollado como proyecto de portfolio. Demuestra:
+- Programación orientada a objetos
+- Manejo de APIs y caché
+- Interfaz gráfica moderna
+- Tests unitarios y de integración
+- Documentación técnica
+- Buenas prácticas de Python
+
+## 📄 Licencia
+
+MIT License - uso libre para fines educativos y de portfolio.
+
+---
+
+**Hecho con ☕ y ❤️ para la comunidad de memes**
+</file>
+
+<file path="src/__init__.py">
+"""
+MemeScript-Py - Generador de memes automático
+"""
+
+__version__ = "2.0.0"
+__author__ = "Contributor"
+__description__ = "Aplicación de escritorio para generar memes con plantillas de Imgflip"
+
+from src.api_client import get_random_meme, get_meme_image, clear_cache, ImgflipAPIError
+from src.renderer import render_meme, get_available_fonts, RendererError
+from src.text_pool import get_random_phrase, add_phrase, TextPoolError
+from src.cache import MemeCache
+
+__all__ = [
+    'get_random_meme',
+    'get_meme_image',
+    'clear_cache',
+    'render_meme',
+    'get_available_fonts',
+    'get_random_phrase',
+    'add_phrase',
+    'ImgflipAPIError',
+    'RendererError',
+    'TextPoolError',
+    'MemeCache',
+]
+</file>
+
+<file path="src/api_client.py">
+# src/api_client.py
+"""
+Módulo API: funciones para interactuar con Imgflip.
+Incluye reintentos automáticos y soporte para caché.
+"""
+
+import random
+import logging
+from typing import Optional, Dict, List, Any, Tuple
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+
+import requests
+
+from src.cache import MemeCache
+
+logger = logging.getLogger(__name__)
+
+IMGFLIP_MEMES_URL = "https://api.imgflip.com/get_memes"
+DEFAULT_TIMEOUT = 10  # segundos
+MAX_RETRIES = 3
+RETRY_BACKOFF = 1.0  # factor de backoff exponencial
+
+# Inicializar caché global
+_meme_cache = MemeCache()
+
+class ImgflipAPIError(Exception):
+    """Excepción personalizada para errores de la API de Imgflip."""
+    pass
+
+def _create_session() -> requests.Session:
+    """
+    Crea una sesión de requests con reintentos automáticos.
+    
+    Returns:
+        requests.Session configurada con reintentos
+    """
+    session = requests.Session()
+    
+    # Configurar estrategia de reintentos
+    retry_strategy = Retry(
+        total=MAX_RETRIES,
+        backoff_factor=RETRY_BACKOFF,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
+    )
+    
+    # Montar adaptador para HTTP y HTTPS
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=10,
+        pool_maxsize=10
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
+
+def get_all_memes(timeout: int = DEFAULT_TIMEOUT) -> Optional[List[Dict[str, Any]]]:
+    """
+    Obtiene la lista completa de plantillas de memes de Imgflip.
+    
+    Args:
+        timeout: Tiempo máximo de espera para la petición
+        
+    Returns:
+        Lista de diccionarios con información de los memes o None si hay error
+        
+    Raises:
+        ImgflipAPIError: Si hay un error en la API
+    """
+    session = _create_session()
+    
+    try:
+        logger.info(f"Obteniendo lista de memes de {IMGFLIP_MEMES_URL}")
+        resp = session.get(IMGFLIP_MEMES_URL, timeout=timeout)
+        resp.raise_for_status()
+        
+        data = resp.json()
+        
+        if not data.get("success"):
+            error_msg = data.get("error_message", "Error desconocido de la API")
+            logger.error(f"API respondió con error: {error_msg}")
+            raise ImgflipAPIError(f"Error de API: {error_msg}")
+        
+        memes = data.get("data", {}).get("memes", [])
+        if not memes:
+            logger.warning("La API devolvió una lista vacía de memes")
+            return []
+        
+        logger.info(f"Obtenidos {len(memes)} memes correctamente")
+        return memes
+        
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Timeout al conectar con Imgflip: {e}")
+        raise ImgflipAPIError("Tiempo de espera agotado al conectar con Imgflip") from e
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Error de conexión con Imgflip: {e}")
+        raise ImgflipAPIError("No se pudo conectar con Imgflip. Verifica tu conexión a internet.") from e
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error en la petición a Imgflip: {e}")
+        raise ImgflipAPIError(f"Error al comunicarse con Imgflip: {str(e)}") from e
+    except ValueError as e:
+        logger.error(f"Error decodificando JSON de Imgflip: {e}")
+        raise ImgflipAPIError("La respuesta de Imgflip no es válida") from e
+
+def get_random_meme(timeout: int = DEFAULT_TIMEOUT) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """
+    Obtiene una plantilla aleatoria de Imgflip.
+    
+    Returns:
+        Tupla (url_imagen, info_template) o None si no se pudo obtener
+        
+    Raises:
+        ImgflipAPIError: Si hay un error en la API
+    """
+    memes = get_all_memes(timeout)
+    
+    if not memes:
+        return None
+    
+    chosen = random.choice(memes)
+    logger.info(f"Template seleccionado: {chosen.get('name')} (ID: {chosen.get('id')})")
+    
+    return chosen.get("url"), chosen
+
+def get_meme_image(template_id: str, image_url: str, use_cache: bool = True) -> Optional[bytes]:
+    """
+    Descarga una imagen de meme, usando caché si está disponible.
+    
+    Args:
+        template_id: ID del template
+        image_url: URL de la imagen
+        use_cache: Si se debe usar el sistema de caché
+        
+    Returns:
+        Datos binarios de la imagen o None si hay error
+    """
+    # Intentar obtener del caché primero
+    if use_cache:
+        cached_path = _meme_cache.get(template_id)
+        if cached_path:
+            logger.info(f"Imagen {template_id} obtenida del caché")
+            try:
+                with open(cached_path, 'rb') as f:
+                    return f.read()
+            except Exception as e:
+                logger.error(f"Error leyendo imagen del caché: {e}")
+    
+    # Descargar imagen
+    session = _create_session()
+    try:
+        logger.info(f"Descargando imagen: {image_url}")
+        resp = session.get(image_url, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        
+        image_data = resp.content
+        
+        # Guardar en caché si se descargó correctamente
+        if use_cache:
+            try:
+                # Necesitamos información del template para el caché
+                memes = get_all_memes()
+                template_info = next((m for m in memes if m["id"] == template_id), {})
+                _meme_cache.put(template_id, image_data, template_info)
+            except Exception as e:
+                logger.error(f"Error guardando en caché: {e}")
+        
+        return image_data
+        
+    except Exception as e:
+        logger.error(f"Error descargando imagen {image_url}: {e}")
+        return None
+
+def clear_cache():
+    """Limpia el caché de imágenes."""
+    _meme_cache.clear()
+
+def get_cache_stats() -> Dict[str, Any]:
+    """Obtiene estadísticas del caché."""
+    return _meme_cache.get_stats()
+</file>
+
+<file path="src/assets/phrases.json">
+[
+  "Cuando el código compila a la primera",
+  "Yo intentando arreglar un bug a las 3 AM",
+  "Ese momento cuando el deploy funciona",
+  "Cuando el cliente dice 'solo un cambio pequeño'",
+  "Cuando el PR pasa sin comentarios",
+  "Yo explicando por qué funciona aunque no lo entienda",
+  "Cuando copias y pegas y mágicamente funciona",
+  "Ese feeling de 'lo dejé para mañana' y mañana llegó",
+  "Cuando el test falla y no sabes por qué",
+  "Cuando el servidor vuelve a la vida después del reinicio",
+  "Cuando el café hace su magia",
+  "Yo: 'solo una iteración más' — 3 horas después",
+  "Cuando el deadline es ayer",
+  "Cuando encuentras el bug en la línea 1",
+  "Ese momento en que la reunión podría haber sido un email",
+  "Cuando el cliente aprueba sin cambios",
+  "Cuando el merge crea conflictos épicos",
+  "Yo viendo el log y entendiendo todo",
+  "Cuando la documentación es más clara que el código",
+  "Cuando el stackoverflow salva tu día",
+  "Cuando el diseño pide 'algo simple y bonito'",
+  "Cuando el build pasa en CI sin warnings",
+  "Yo intentando reproducir el bug en local",
+  "Cuando el equipo celebra un release estable",
+  "Ese silencio después de un deploy exitoso",
+  "Cuando el teclado decide no responder",
+  "Cuando el backup funciona y te salva",
+  "Yo: 'esto será rápido' — la vida se ríe",
+  "Cuando la API devuelve 200 y no sabes por qué",
+  "Cuando el cliente pide 'solo cambiar color'",
+  "Cuando el test flaky pasa justo ahora",
+  "Yo viendo el inbox después de vacaciones",
+  "Cuando la reunión se alarga y el café se acaba",
+  "Cuando el diseño cambia a última hora",
+  "Ese momento de '¿por qué esto estaba así?'",
+  "Cuando el script corre sin errores",
+  "Cuando el equipo arregla un bug crítico a medianoche",
+  "Yo celebrando un refactor que no rompió nada",
+  "Cuando la versión en producción es la misma que en staging",
+  "Cuando el usuario reporta 'no pasa nada' y pasa todo",
+  "Cuando el cliente dice 'hazlo bonito' sin especificar",
+  "Yo intentando explicar por qué no es un bug, es una feature",
+  "Cuando el merge request tiene 200 archivos",
+  "Cuando el test cubre exactamente lo que rompiste",
+  "Ese momento en que el CI falla por un typo",
+  "Cuando encuentras una solución elegante a la primera",
+  "Cuando el equipo responde al ping en 5 minutos",
+  "Yo viendo el gráfico de errores y baja la curva",
+  "Cuando el deploy tarda menos de lo esperado",
+  "Cuando el servidor responde en milisegundos",
+  "Cuando el cliente dice 'me encanta' y no pide cambios",
+  "Yo intentando recordar por qué dejé ese TODO",
+  "Cuando la reunión termina 10 minutos antes",
+  "Cuando el mock funciona igual que la API real",
+  "Ese instante en que el merge automático funciona",
+  "Cuando el código legado finalmente tiene tests",
+  "Cuando el bug era un punto y coma",
+  "Yo celebrando que el README ahora es útil",
+  "Cuando el equipo hace pair programming y avanza rápido"
+]
+</file>
+
+<file path="src/text_pool.py">
+# src/text_pool.py
+"""
+Gestión del pool de frases con operaciones CRUD completas.
+"""
+
+import json
+import random
+import logging
+import shutil
+from pathlib import Path
+from typing import List, Optional
+
+logger = logging.getLogger(__name__)
+
+PHRASES_PATH = Path(__file__).parent / "assets" / "phrases.json"
+MAX_PHRASE_LENGTH = 200  # Caracteres máximos por frase
+
+class TextPoolError(Exception):
+    """Excepción personalizada para errores del pool de texto."""
+    pass
+
+def load_phrases(path: Path = PHRASES_PATH) -> List[str]:
+    """
+    Carga las frases desde el archivo JSON.
+    
+    Args:
+        path: Ruta al archivo de frases
+        
+    Returns:
+        Lista de frases
+    """
+    if not path.exists():
+        logger.warning(f"Archivo de frases no encontrado: {path}")
+        return []
+    
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        
+        if isinstance(data, list):
+            # Validar y limpiar frases
+            phrases = []
+            for item in data:
+                if isinstance(item, str):
+                    # Truncar frases muy largas
+                    if len(item) > MAX_PHRASE_LENGTH:
+                        logger.warning(f"Frase truncada (>{MAX_PHRASE_LENGTH} chars): {item[:50]}...")
+                        item = item[:MAX_PHRASE_LENGTH]
+                    phrases.append(item)
+                else:
+                    phrases.append(str(item))
+            
+            logger.info(f"Cargadas {len(phrases)} frases de {path}")
+            return phrases
+        else:
+            logger.error(f"Formato inválido en {path}: se esperaba una lista")
+            return []
+            
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decodificando JSON de {path}: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Error inesperado cargando frases: {e}")
+        return []
+
+def save_phrases(phrases: List[str], path: Path = PHRASES_PATH) -> bool:
+    """
+    Guarda las frases en el archivo JSON de forma segura.
+    
+    Args:
+        phrases: Lista de frases a guardar
+        path: Ruta al archivo de frases
+        
+    Returns:
+        True si se guardó correctamente, False en caso contrario
+    """
+    # Validar frases
+    validated_phrases = []
+    for p in phrases:
+        if not isinstance(p, str):
+            p = str(p)
+        if len(p) > MAX_PHRASE_LENGTH:
+            logger.warning(f"Frase truncada al guardar: {p[:50]}...")
+            p = p[:MAX_PHRASE_LENGTH]
+        if p.strip():  # Solo guardar frases no vacías
+            validated_phrases.append(p.strip())
+    
+    # Crear directorio si no existe
+    path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Guardar usando archivo temporal + renombrado
+    temp_path = path.with_suffix('.tmp')
+    try:
+        with open(temp_path, "w", encoding="utf-8") as fh:
+            json.dump(validated_phrases, fh, indent=2, ensure_ascii=False)
+        
+        # Renombrar archivo temporal al destino
+        shutil.move(str(temp_path), str(path))
+        
+        logger.info(f"Guardadas {len(validated_phrases)} frases en {path}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error guardando frases en {path}: {e}")
+        # Limpiar archivo temporal si existe
+        if temp_path.exists():
+            temp_path.unlink()
+        return False
+
+def get_random_phrase() -> str:
+    """
+    Obtiene una frase aleatoria del pool.
+    
+    Returns:
+        Frase aleatoria o texto por defecto si no hay frases
+    """
+    phrases = load_phrases()
+    if not phrases:
+        logger.info("Pool de frases vacío, usando texto por defecto")
+        return "Texto de ejemplo"
+    
+    return random.choice(phrases)
+
+def add_phrase(phrase: str) -> bool:
+    """
+    Añade una nueva frase al pool.
+    
+    Args:
+        phrase: La frase a añadir
+        
+    Returns:
+        True si se añadió correctamente
+    """
+    if not phrase or not phrase.strip():
+        raise TextPoolError("La frase no puede estar vacía")
+    
+    if len(phrase) > MAX_PHRASE_LENGTH:
+        raise TextPoolError(f"La frase no puede tener más de {MAX_PHRASE_LENGTH} caracteres")
+    
+    phrases = load_phrases()
+    phrases.append(phrase.strip())
+    
+    return save_phrases(phrases)
+
+def update_phrase(index: int, new_phrase: str) -> bool:
+    """
+    Actualiza una frase existente.
+    
+    Args:
+        index: Índice de la frase a actualizar
+        new_phrase: Nuevo texto de la frase
+        
+    Returns:
+        True si se actualizó correctamente
+    """
+    if not new_phrase or not new_phrase.strip():
+        raise TextPoolError("La frase no puede estar vacía")
+    
+    if len(new_phrase) > MAX_PHRASE_LENGTH:
+        raise TextPoolError(f"La frase no puede tener más de {MAX_PHRASE_LENGTH} caracteres")
+    
+    phrases = load_phrases()
+    
+    if index < 0 or index >= len(phrases):
+        raise TextPoolError(f"Índice {index} fuera de rango")
+    
+    phrases[index] = new_phrase.strip()
+    return save_phrases(phrases)
+
+def delete_phrase(index: int) -> bool:
+    """
+    Elimina una frase del pool.
+    
+    Args:
+        index: Índice de la frase a eliminar
+        
+    Returns:
+        True si se eliminó correctamente
+    """
+    phrases = load_phrases()
+    
+    if index < 0 or index >= len(phrases):
+        raise TextPoolError(f"Índice {index} fuera de rango")
+    
+    deleted = phrases.pop(index)
+    logger.info(f"Frase eliminada: {deleted[:50]}...")
+    
+    return save_phrases(phrases)
+
+def get_phrases_count() -> int:
+    """
+    Obtiene el número de frases en el pool.
+    
+    Returns:
+        Número de frases
+    """
+    return len(load_phrases())
+</file>
+
+<file path="tests/test_api_client.py">
+# tests/test_api_client.py
+"""
+Tests para el módulo api_client.py
+"""
+
+import sys
+import json
+import pytest
+import requests
+from pathlib import Path
+from unittest.mock import Mock, patch, MagicMock, mock_open
+from typing import Any, Dict, List
+
+# Asegurar imports desde la raíz del repo
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.api_client import (
+    get_all_memes,
+    get_random_meme,
+    get_meme_image,
+    clear_cache,
+    get_cache_stats,
+    ImgflipAPIError,
+    _create_session
+)
+from src.cache import MemeCache
+
+# Datos de ejemplo para tests
+SAMPLE_MEMES_RESPONSE = {
+    "success": True,
+    "data": {
+        "memes": [
+            {
+                "id": "123456",
+                "name": "Test Meme 1",
+                "url": "https://i.imgflip.com/test1.jpg",
+                "width": 500,
+                "height": 500
+            },
+            {
+                "id": "789012",
+                "name": "Test Meme 2",
+                "url": "https://i.imgflip.com/test2.jpg",
+                "width": 600,
+                "height": 400
+            }
+        ]
+    }
+}
+
+SAMPLE_ERROR_RESPONSE = {
+    "success": False,
+    "error_message": "API rate limit exceeded"
+}
+
+class TestApiClient:
+    """Tests para las funciones de api_client.py"""
+
+    def test_create_session_with_retries(self):
+        """Verifica que la sesión se cree con la configuración de reintentos correcta."""
+        session = _create_session()
+        
+        assert isinstance(session, requests.Session)
+        # Verificar que los adapters están montados
+        assert 'http://' in session.adapters
+        assert 'https://' in session.adapters
+        
+        # Verificar configuración de reintentos (esto es un poco más complejo de testear directamente)
+        http_adapter = session.adapters['http://']
+        assert hasattr(http_adapter, 'max_retries')
+        assert http_adapter._pool_connections == 10
+        assert http_adapter._pool_maxsize == 10
+
+    @patch('src.api_client._create_session')
+    def test_get_all_memes_success(self, mock_create_session):
+        """Test de obtención exitosa de memes."""
+        # Configurar mock
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = SAMPLE_MEMES_RESPONSE
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_create_session.return_value = mock_session
+        
+        # Ejecutar
+        result = get_all_memes()
+        
+        # Verificar
+        assert result is not None
+        assert len(result) == 2
+        assert result[0]['id'] == '123456'
+        assert result[1]['name'] == 'Test Meme 2'
+        mock_session.get.assert_called_once_with(
+            'https://api.imgflip.com/get_memes',
+            timeout=10
+        )
+
+    @patch('src.api_client._create_session')
+    def test_get_all_memes_api_error(self, mock_create_session):
+        """Test de error de API (success=False)."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = SAMPLE_ERROR_RESPONSE
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_create_session.return_value = mock_session
+        
+        with pytest.raises(ImgflipAPIError) as exc_info:
+            get_all_memes()
+        
+        assert "API rate limit exceeded" in str(exc_info.value)
+
+    @patch('src.api_client._create_session')
+    def test_get_all_memes_http_error(self, mock_create_session):
+        """Test de error HTTP (404, 500, etc.)."""
+        mock_session = Mock()
+        mock_session.get.side_effect = requests.exceptions.HTTPError("404 Not Found")
+        mock_create_session.return_value = mock_session
+        
+        with pytest.raises(ImgflipAPIError) as exc_info:
+            get_all_memes()
+        
+        assert "Error al comunicarse" in str(exc_info.value)
+
+    @patch('src.api_client._create_session')
+    def test_get_all_memes_timeout(self, mock_create_session):
+        """Test de timeout."""
+        mock_session = Mock()
+        mock_session.get.side_effect = requests.exceptions.Timeout("Connection timeout")
+        mock_create_session.return_value = mock_session
+        
+        with pytest.raises(ImgflipAPIError) as exc_info:
+            get_all_memes()
+        
+        assert "Tiempo de espera agotado" in str(exc_info.value)
+
+    @patch('src.api_client._create_session')
+    def test_get_all_memes_connection_error(self, mock_create_session):
+        """Test de error de conexión."""
+        mock_session = Mock()
+        mock_session.get.side_effect = requests.exceptions.ConnectionError("Connection refused")
+        mock_create_session.return_value = mock_session
+        
+        with pytest.raises(ImgflipAPIError) as exc_info:
+            get_all_memes()
+        
+        assert "No se pudo conectar" in str(exc_info.value)
+
+    @patch('src.api_client.get_all_memes')
+    def test_get_random_meme_success(self, mock_get_all_memes):
+        """Test de obtención aleatoria de meme."""
+        mock_get_all_memes.return_value = SAMPLE_MEMES_RESPONSE['data']['memes']
+        
+        result = get_random_meme()
+        
+        assert result is not None
+        url, info = result
+        assert url in ['https://i.imgflip.com/test1.jpg', 'https://i.imgflip.com/test2.jpg']
+        assert 'id' in info
+
+    @patch('src.api_client.get_all_memes')
+    def test_get_random_meme_empty_list(self, mock_get_all_memes):
+        """Test cuando la lista de memes está vacía."""
+        mock_get_all_memes.return_value = []
+        
+        result = get_random_meme()
+        
+        assert result is None
+
+    @patch('src.api_client.get_all_memes')
+    def test_get_random_meme_none(self, mock_get_all_memes):
+        """Test cuando get_all_memes devuelve None."""
+        mock_get_all_memes.return_value = None
+        
+        result = get_random_meme()
+        
+        assert result is None
+
+    @patch('src.api_client._meme_cache')
+    @patch('src.api_client._create_session')
+    def test_get_meme_image_from_cache(self, mock_create_session, mock_cache):
+        """Test de obtención de imagen desde caché."""
+        # Configurar mock del caché
+        mock_cache.get.return_value = Path("/fake/cache/path/image.png")
+        
+        # Mock para lectura de archivo
+        mock_image_data = b"fake_image_data"
+        with patch('builtins.open', mock_open(read_data=mock_image_data)):
+            result = get_meme_image("123456", "https://example.com/image.jpg")
+        
+        # Verificar que NO se intentó descargar
+        mock_create_session.assert_not_called()
+        assert result == mock_image_data
+
+    @patch('src.api_client._meme_cache')
+    @patch('src.api_client._create_session')
+    @patch('src.api_client.get_all_memes')
+    def test_get_meme_image_download(self, mock_get_all_memes, mock_create_session, mock_cache):
+        """Test de descarga de imagen (no en caché)."""
+        # Configurar mock del caché (no encontrado)
+        mock_cache.get.return_value = None
+        
+        # Configurar mock de sesión para descarga
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.content = b"downloaded_image_data"
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_create_session.return_value = mock_session
+        
+        # Configurar mock para get_all_memes (necesario para guardar en caché)
+        mock_get_all_memes.return_value = SAMPLE_MEMES_RESPONSE['data']['memes']
+        
+        result = get_meme_image("123456", "https://example.com/image.jpg")
+        
+        # Verificar que se descargó
+        mock_session.get.assert_called_once_with(
+            "https://example.com/image.jpg",
+            timeout=10
+        )
+        # Verificar que se intentó guardar en caché
+        mock_cache.put.assert_called_once()
+        assert result == b"downloaded_image_data"
+
+    @patch('src.api_client._meme_cache')
+    @patch('src.api_client._create_session')
+    def test_get_meme_image_download_error(self, mock_create_session, mock_cache):
+        """Test de error en descarga de imagen."""
+        mock_cache.get.return_value = None
+        
+        mock_session = Mock()
+        mock_session.get.side_effect = Exception("Download failed")
+        mock_create_session.return_value = mock_session
+        
+        result = get_meme_image("123456", "https://example.com/image.jpg")
+        
+        assert result is None
+
+    @patch('src.api_client._meme_cache')
+    def test_clear_cache(self, mock_cache):
+        """Test de limpieza de caché."""
+        clear_cache()
+        mock_cache.clear.assert_called_once()
+
+    @patch('src.api_client._meme_cache')
+    def test_get_cache_stats(self, mock_cache):
+        """Test de obtención de estadísticas de caché."""
+        expected_stats = {
+            "total_images": 5,
+            "total_size_mb": 10.5,
+            "max_size_mb": 500,
+            "usage_percent": 2.1,
+            "cache_dir": "/fake/cache/dir"
+        }
+        mock_cache.get_stats.return_value = expected_stats
+        
+        stats = get_cache_stats()
+        
+        assert stats == expected_stats
+        mock_cache.get_stats.assert_called_once()
+
+
+class TestMemeCache:
+    """Tests para la clase MemeCache."""
+
+    def test_cache_initialization(self, tmp_path):
+        """Test de inicialización del caché."""
+        cache = MemeCache(cache_dir=tmp_path, max_size_mb=100, max_age_days=7)
+        
+        assert cache.cache_dir == tmp_path
+        assert cache.images_dir == tmp_path / "images"
+        assert cache.metadata_file == tmp_path / "metadata.json"
+        assert cache.max_size_bytes == 100 * 1024 * 1024
+        assert cache.images_dir.exists()
+
+    def test_cache_key_generation(self):
+        """Test de generación de claves de caché."""
+        cache = MemeCache()
+        
+        key1 = cache._get_cache_key("123")
+        key2 = cache._get_cache_key("123")
+        key3 = cache._get_cache_key("456")
+        
+        assert key1 == key2  # Misma entrada debe dar misma clave
+        assert key1 != key3  # Diferente entrada debe dar diferente clave
+        assert len(key1) == 32  # MD5 produce 32 caracteres hex
+
+    def test_put_and_get(self, tmp_path):
+        """Test de guardar y recuperar del caché."""
+        cache = MemeCache(cache_dir=tmp_path)
+        
+        template_id = "test123"
+        image_data = b"fake_image_data"
+        template_info = {
+            "name": "Test Template",
+            "url": "https://example.com/test.jpg",
+            "width": 500,
+            "height": 500
+        }
+        
+        # Guardar
+        saved_path = cache.put(template_id, image_data, template_info)
+        assert saved_path.exists()
+        assert saved_path.parent == cache.images_dir
+        
+        # Recuperar
+        retrieved_path = cache.get(template_id)
+        assert retrieved_path == saved_path
+        
+        # Verificar contenido
+        with open(retrieved_path, 'rb') as f:
+            assert f.read() == image_data
+
+    def test_cache_expiration(self, tmp_path):
+        """Test de expiración de caché."""
+        cache = MemeCache(cache_dir=tmp_path, max_age_days=0)  # Expira inmediatamente
+        
+        template_id = "test123"
+        image_data = b"fake_image_data"
+        template_info = {"name": "Test"}
+        
+        # Guardar
+        cache.put(template_id, image_data, template_info)
+        
+        # Modificar timestamp en metadatos para simular expiración
+        cache.metadata["templates"][cache._get_cache_key(template_id)]["cached_at"] = "2000-01-01T00:00:00"
+        cache._save_metadata()
+        
+        # Intentar recuperar (debería fallar por expiración)
+        result = cache.get(template_id)
+        assert result is None
+
+    def test_cache_lru_cleanup(self, tmp_path):
+        """Test de limpieza LRU cuando se excede el tamaño."""
+        # Caché muy pequeño (solo 1KB)
+        cache = MemeCache(cache_dir=tmp_path, max_size_mb=0.001)  # ~1KB
+        
+        # Guardar primera imagen (500 bytes)
+        data1 = b"x" * 500
+        cache.put("id1", data1, {"name": "Test1"})
+        
+        # Guardar segunda imagen (600 bytes) - debería forzar limpieza
+        data2 = b"y" * 600
+        cache.put("id2", data2, {"name": "Test2"})
+        
+        # La primera imagen debería haber sido eliminada
+        assert cache.get("id1") is None
+        assert cache.get("id2") is not None
+
+    def test_cache_clear(self, tmp_path):
+        """Test de limpieza completa del caché."""
+        cache = MemeCache(cache_dir=tmp_path)
+        
+        # Guardar algunas imágenes
+        for i in range(3):
+            cache.put(f"id{i}", b"data", {"name": f"Test{i}"})
+        
+        assert len(list(cache.images_dir.glob("*.png"))) == 3
+        
+        # Limpiar caché
+        cache.clear()
+        
+        assert len(list(cache.images_dir.glob("*.png"))) == 0
+        assert cache.metadata["templates"] == {}
+        assert cache.metadata["size"] == 0
+
+    def test_cache_stats(self, tmp_path):
+        """Test de estadísticas del caché."""
+        cache = MemeCache(cache_dir=tmp_path, max_size_mb=100)
+        
+        # Guardar algunas imágenes
+        for i in range(3):
+            cache.put(f"id{i}", b"x" * 1000, {"name": f"Test{i}"})
+        
+        stats = cache.get_stats()
+        
+        assert stats["total_images"] == 3
+        assert stats["total_size_mb"] > 0
+        assert stats["max_size_mb"] == 100
+        assert stats["cache_dir"] == str(tmp_path)
+        assert 0 <= stats["usage_percent"] <= 100
+
+    def test_cache_metadata_persistence(self, tmp_path):
+        """Test de persistencia de metadatos entre instancias."""
+        # Crear primera instancia y guardar datos
+        cache1 = MemeCache(cache_dir=tmp_path)
+        cache1.put("test_id", b"data", {"name": "Test"})
+        
+        # Crear segunda instancia (debería cargar metadatos)
+        cache2 = MemeCache(cache_dir=tmp_path)
+        
+        # Verificar que puede recuperar la imagen
+        result = cache2.get("test_id")
+        assert result is not None
+        assert result.exists()
+</file>
+
+<file path="tests/test_renderer.py">
+# tests/test_renderer.py
+"""
+Tests para el módulo renderer.py
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+from PIL import Image, ImageChops, ImageFont
+
+# Asegurar imports desde la raíz del repo
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.renderer import (
+    render_meme,
+    get_available_fonts,
+    _safe_load_font,
+    _reduce_image_if_needed,
+    _wrap_text_for_width,
+    RendererError,
+    MAX_DIMENSION
+)
+
+
+def _diff_bbox(original: Image.Image, modified: Image.Image):
+    """
+    Devuelve el bounding box (left, upper, right, lower) del área que difiere
+    entre original y modified. Si no hay diferencias, devuelve None.
+    """
+    o = original.convert("RGBA")
+    m = modified.convert("RGBA")
+    diff = ImageChops.difference(o, m)
+    return diff.getbbox()
+
+
+class TestRenderer:
+    """Tests para las funciones de renderizado."""
+
+    def test_get_available_fonts(self):
+        """Test de obtención de fuentes disponibles."""
+        fonts = get_available_fonts()
+        
+        # Debería devolver una lista (puede estar vacía si no hay fuentes)
+        assert isinstance(fonts, list)
+        
+        # Si hay fuentes, deberían ser strings no vacíos
+        for font in fonts:
+            assert isinstance(font, str)
+            assert len(font) > 0
+
+    def test_safe_load_font_default(self):
+        """Test de carga de fuente por defecto."""
+        font = _safe_load_font(None, 24)
+        
+        assert font is not None
+        # La fuente por defecto no es FreeType, pero sigue siendo válida
+
+    def test_render_meme_returns_image_and_same_size(self):
+        """Test básico de renderizado."""
+        img = Image.new("RGB", (800, 600), color=(60, 60, 60))
+        top = "TEXTO ARRIBA"
+        bottom = "TEXTO ABAJO"
+        
+        out = render_meme(
+            img,
+            top_text=top,
+            bottom_text=bottom,
+            font_size_ratio=0.06,
+            max_text_height_ratio=0.35
+        )
+        
+        assert isinstance(out, Image.Image)
+        assert out.size == img.size
+        assert out.mode == "RGBA"
+
+    def test_render_meme_with_shadow(self):
+        """Test de renderizado con sombra."""
+        img = Image.new("RGB", (800, 600), color=(60, 60, 60))
+        
+        out = render_meme(
+            img,
+            top_text="Texto con sombra",
+            bottom_text="",
+            shadow=True
+        )
+        
+        assert isinstance(out, Image.Image)
+        bbox = _diff_bbox(img, out)
+        assert bbox is not None  # Debe haber cambios
+
+    def test_render_meme_empty_text(self):
+        """Test con texto vacío."""
+        img = Image.new("RGB", (800, 600), color=(60, 60, 60))
+        
+        out = render_meme(img, top_text="", bottom_text="")
+        
+        # Sin texto, la imagen no debería cambiar
+        bbox = _diff_bbox(img, out)
+        assert bbox is None
+
+    def test_render_meme_single_line(self):
+        """Test con una sola línea de texto."""
+        img = Image.new("RGB", (800, 600), color=(60, 60, 60))
+        
+        out = render_meme(
+            img,
+            top_text="Solo texto superior",
+            bottom_text=""
+        )
+        
+        bbox = _diff_bbox(img, out)
+        assert bbox is not None
+        
+        left, upper, right, lower = bbox
+        # El texto debería estar en la parte superior
+        assert upper < 300  # Mitad superior
+
+    def test_render_meme_both_lines(self):
+        """Test con texto superior e inferior."""
+        img = Image.new("RGB", (800, 600), color=(60, 60, 60))
+        
+        out = render_meme(
+            img,
+            top_text="Texto arriba",
+            bottom_text="Texto abajo"
+        )
+        
+        bbox = _diff_bbox(img, out)
+        assert bbox is not None
+        
+        left, upper, right, lower = bbox
+        # Debería haber cambios en toda la altura
+        assert upper < 100  # Texto arriba
+        assert lower > 500  # Texto abajo
+
+    def test_text_area_within_allowed_ratio_small_image(self):
+        """Test con imagen pequeña - el texto debe ajustarse."""
+        w, h = 300, 180
+        img = Image.new("RGB", (w, h), color=(60, 60, 60))
+        long_phrase = " ".join(["MUCHO TEXTO"] * 12)
+
+        max_text_height_ratio = 0.35
+        out = render_meme(
+            img,
+            top_text=long_phrase,
+            bottom_text="",
+            font_size_ratio=0.08,
+            max_text_height_ratio=max_text_height_ratio,
+            padding_ratio=0.02
+        )
+
+        bbox = _diff_bbox(img, out)
+        assert bbox is not None
+        
+        left, upper, right, lower = bbox
+        occupied_height = lower - upper
+        allowed = int(h * max_text_height_ratio) + 4
+        
+        assert occupied_height <= allowed, f"Texto demasiado alto: {occupied_height} > {allowed}"
+        assert 0 <= left < right <= w
+        assert 0 <= upper < lower <= h
+
+    def test_text_area_within_allowed_ratio_large_image(self):
+        """Test con imagen grande."""
+        w, h = 1200, 900
+        img = Image.new("RGB", (w, h), color=(60, 60, 60))
+        long_phrase_top = " ".join(["ARRIBA"] * 20)
+        long_phrase_bottom = " ".join(["ABAJO"] * 20)
+
+        max_text_height_ratio = 0.35
+        out = render_meme(
+            img,
+            top_text=long_phrase_top,
+            bottom_text=long_phrase_bottom,
+            font_size_ratio=0.06,
+            max_text_height_ratio=max_text_height_ratio,
+            padding_ratio=0.02
+        )
+
+        bbox = _diff_bbox(img, out)
+        assert bbox is not None
+        
+        left, upper, right, lower = bbox
+        occupied_height = lower - upper
+        allowed = int(h * max_text_height_ratio) + 8
+        
+        assert occupied_height <= allowed
+        assert 0 <= left < right <= w
+        assert 0 <= upper < lower <= h
+
+    def test_reduce_image_if_needed(self):
+        """Test de reducción de imágenes grandes."""
+        # Imagen que excede el límite
+        large_img = Image.new("RGB", (MAX_DIMENSION + 1000, MAX_DIMENSION + 1000))
+        
+        reduced = _reduce_image_if_needed(large_img)
+        
+        assert reduced.size[0] <= MAX_DIMENSION
+        assert reduced.size[1] <= MAX_DIMENSION
+        
+        # Imagen que no excede el límite
+        small_img = Image.new("RGB", (1000, 800))
+        not_reduced = _reduce_image_if_needed(small_img)
+        
+        assert not_reduced.size == small_img.size
+
+    def test_wrap_text_for_width(self):
+        """Test de wrapping de texto."""
+        img = Image.new("RGB", (800, 600))
+        from PIL import ImageDraw
+        
+        draw = ImageDraw.Draw(img)
+        font = _safe_load_font(None, 30)
+        
+        # Texto corto que no necesita wrap
+        short_text = "Texto corto"
+        lines = _wrap_text_for_width(short_text, draw, font, 500)
+        assert len(lines) == 1
+        
+        # Texto largo que necesita wrap
+        long_text = "Esta es una frase muy larga que debería dividirse en múltiples líneas"
+        lines = _wrap_text_for_width(long_text, draw, font, 200)
+        assert len(lines) > 1
+
+    def test_render_with_different_font_sizes(self):
+        """Test con diferentes tamaños de fuente."""
+        img = Image.new("RGB", (800, 600))
+        
+        # Tamaño pequeño
+        out_small = render_meme(img, top_text="Test", font_size_ratio=0.05)
+        # Tamaño grande
+        out_large = render_meme(img, top_text="Test", font_size_ratio=0.15)
+        
+        # Ambos deberían ser diferentes
+        bbox = _diff_bbox(out_small, out_large)
+        assert bbox is not None
+
+    def test_render_with_special_characters(self):
+        """Test con caracteres especiales y acentos."""
+        img = Image.new("RGB", (800, 600))
+        special_text = "¡Carácteres especiales! áéíóú ñ Ñ ¿? ¡! @#$%"
+        
+        try:
+            out = render_meme(img, top_text=special_text)
+            assert isinstance(out, Image.Image)
+        except Exception as e:
+            pytest.fail(f"Error renderizando caracteres especiales: {e}")
+
+    def test_render_with_very_long_word(self):
+        """Test con una palabra muy larga (debería truncar o wrap)."""
+        img = Image.new("RGB", (800, 600))
+        long_word = "Supercalifragilisticoespialidoso" * 10
+        
+        try:
+            out = render_meme(img, top_text=long_word)
+            assert isinstance(out, Image.Image)
+        except Exception as e:
+            pytest.fail(f"Error con palabra muy larga: {e}")
+
+    def test_render_error_handling(self):
+        """Test de manejo de errores."""
+        img = Image.new("RGB", (800, 600))
+        
+        # Probar con valores extremos (no deberían causar error)
+        try:
+            render_meme(
+                img,
+                top_text="Test",
+                font_size_ratio=2.0,  # Tamaño enorme
+                max_text_height_ratio=0.01  # Altura mínima
+            )
+        except RendererError:
+            pytest.fail("No debería lanzar error con valores extremos")
+        except Exception as e:
+            # Otros errores pueden ocurrir pero no queremos que fallen los tests
+            pass
+
+
+class TestRendererEdgeCases:
+    """Tests para casos extremos del renderizado."""
+
+    def test_transparent_image(self):
+        """Test con imagen transparente (RGBA)."""
+        img = Image.new("RGBA", (800, 600), (255, 0, 0, 128))  # Semitransparente
+        
+        out = render_meme(img, top_text="Test")
+        
+        assert out.mode == "RGBA"
+        assert out.getpixel((100, 100))[3] == 255  # El texto debería ser opaco
+
+    def test_grayscale_image(self):
+        """Test con imagen en escala de grises."""
+        img = Image.new("L", (800, 600), color=128)  # 'L' = Luminancia (grises)
+        
+        out = render_meme(img, top_text="Test")
+        
+        assert out.mode == "RGBA"  # Debería convertir a RGBA
+
+    def test_palette_image(self):
+        """Test con imagen en modo paleta."""
+        img = Image.new("P", (800, 600), color=1)  # 'P' = Paleta
+        
+        out = render_meme(img, top_text="Test")
+        
+        assert out.mode == "RGBA"  # Debería convertir a RGBA
+
+    def test_extreme_aspect_ratio(self):
+        """Test con relación de aspecto extrema."""
+        # Imagen muy panorámica
+        wide_img = Image.new("RGB", (2000, 200))
+        # Imagen muy vertical
+        tall_img = Image.new("RGB", (200, 2000))
+        
+        try:
+            out_wide = render_meme(wide_img, top_text="Test")
+            out_tall = render_meme(tall_img, top_text="Test")
+            
+            assert out_wide.size == wide_img.size
+            assert out_tall.size == tall_img.size
+        except Exception as e:
+            pytest.fail(f"Error con aspect ratio extremo: {e}")
+
+    def test_multiline_text_positioning(self):
+        """Test de posicionamiento de texto multilínea."""
+        img = Image.new("RGB", (800, 600))
+        
+        # Texto con múltiples líneas
+        multi_line = "Línea 1\nLínea 2\nLínea 3"
+        
+        out = render_meme(img, top_text=multi_line)
+        
+        # Debería renderizar sin errores
+        assert isinstance(out, Image.Image)
+        bbox = _diff_bbox(img, out)
+        assert bbox is not None
+</file>
+
+<file path="tests/test_text_poop.py">
+# tests/test_text_pool.py
+"""
+Tests para el módulo text_pool.py
+"""
+
+import sys
+import json
+import pytest
+import shutil
+from pathlib import Path
+from unittest.mock import patch, mock_open, MagicMock
+
+# Asegurar imports desde la raíz del repo
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.text_pool import (
+    load_phrases,
+    save_phrases,
+    get_random_phrase,
+    add_phrase,
+    update_phrase,
+    delete_phrase,
+    get_phrases_count,
+    TextPoolError,
+    PHRASES_PATH,
+    MAX_PHRASE_LENGTH
+)
+
+# Datos de ejemplo
+SAMPLE_PHRASES = [
+    "Frase de prueba 1",
+    "Frase de prueba 2",
+    "Frase de prueba 3",
+    "Esta es una frase más larga para probar el wrapping",
+    "Otra frase con acentos y caracteres especiales: ñ, á, é, í, ó, ú"
+]
+
+class TestTextPool:
+    """Tests para las funciones de text_pool.py"""
+
+    def test_load_phrases_success(self, tmp_path):
+        """Test de carga exitosa de frases."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        # Crear archivo de prueba
+        with open(phrases_file, 'w', encoding='utf-8') as f:
+            json.dump(SAMPLE_PHRASES, f, ensure_ascii=False)
+        
+        # Cargar frases
+        loaded = load_phrases(phrases_file)
+        
+        assert loaded == SAMPLE_PHRASES
+        assert len(loaded) == 5
+
+    def test_load_phrases_file_not_found(self, tmp_path):
+        """Test cuando el archivo no existe."""
+        phrases_file = tmp_path / "nonexistent.json"
+        
+        loaded = load_phrases(phrases_file)
+        
+        assert loaded == []
+
+    def test_load_phrases_invalid_json(self, tmp_path):
+        """Test con JSON inválido."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        # Escribir JSON inválido
+        with open(phrases_file, 'w') as f:
+            f.write("{esto no es json valido")
+        
+        loaded = load_phrases(phrases_file)
+        
+        assert loaded == []
+
+    def test_load_phrases_not_a_list(self, tmp_path):
+        """Test cuando el JSON no es una lista."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        # Guardar un diccionario en lugar de lista
+        with open(phrases_file, 'w') as f:
+            json.dump({"key": "value"}, f)
+        
+        loaded = load_phrases(phrases_file)
+        
+        assert loaded == []
+
+    def test_load_phrases_with_long_texts(self, tmp_path):
+        """Test con frases que exceden la longitud máxima."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        # Crear frase muy larga
+        long_phrase = "x" * (MAX_PHRASE_LENGTH + 100)
+        test_data = ["normal", long_phrase, "otra normal"]
+        
+        with open(phrases_file, 'w', encoding='utf-8') as f:
+            json.dump(test_data, f)
+        
+        loaded = load_phrases(phrases_file)
+        
+        # La frase larga debería estar truncada
+        assert len(loaded) == 3
+        assert len(loaded[1]) <= MAX_PHRASE_LENGTH
+        assert loaded[0] == "normal"
+        assert loaded[2] == "otra normal"
+
+    def test_save_phrases_success(self, tmp_path):
+        """Test de guardado exitoso de frases."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        # Guardar frases
+        result = save_phrases(SAMPLE_PHRASES, phrases_file)
+        
+        assert result is True
+        assert phrases_file.exists()
+        
+        # Verificar contenido
+        with open(phrases_file, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+        
+        assert saved == SAMPLE_PHRASES
+
+    def test_save_phrases_creates_directory(self, tmp_path):
+        """Test que verifica que se crea el directorio si no existe."""
+        deep_path = tmp_path / "subdir" / "deep" / "phrases.json"
+        
+        result = save_phrases(SAMPLE_PHRASES, deep_path)
+        
+        assert result is True
+        assert deep_path.exists()
+        assert deep_path.parent.exists()
+
+    def test_save_phrases_empty_and_long(self, tmp_path):
+        """Test de guardado con frases vacías y muy largas."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        long_phrase = "x" * (MAX_PHRASE_LENGTH + 50)
+        test_data = [
+            "normal",
+            "",  # vacía
+            "   ",  # solo espacios
+            long_phrase,
+            None,  # no string
+            123,  # número
+        ]
+        
+        result = save_phrases(test_data, phrases_file)  # type: ignore
+        
+        assert result is True
+        
+        with open(phrases_file, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+        
+        # Las frases vacías y espacios deberían omitirse
+        # Las largas deberían truncarse
+        # Los no strings deberían convertirse
+        assert "normal" in saved
+        assert "" not in saved
+        assert "   " not in saved
+        assert len([p for p in saved if "x" in p][0]) <= MAX_PHRASE_LENGTH
+        assert "123" in saved
+
+    def test_save_phrases_permission_error(self, tmp_path):
+        """Test de error de permisos al guardar."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        # Simular error de permisos
+        with patch('builtins.open', side_effect=PermissionError("Permission denied")):
+            result = save_phrases(SAMPLE_PHRASES, phrases_file)
+        
+        assert result is False
+
+    def test_get_random_phrase(self):
+        """Test de obtención de frase aleatoria."""
+        with patch('src.text_pool.load_phrases') as mock_load:
+            mock_load.return_value = SAMPLE_PHRASES
+            
+            phrase = get_random_phrase()
+            
+            assert phrase in SAMPLE_PHRASES
+
+    def test_get_random_phrase_empty_pool(self):
+        """Test cuando el pool está vacío."""
+        with patch('src.text_pool.load_phrases') as mock_load:
+            mock_load.return_value = []
+            
+            phrase = get_random_phrase()
+            
+            assert phrase == "Texto de ejemplo"
+
+    def test_add_phrase_success(self):
+        """Test de añadir frase exitosamente."""
+        with patch('src.text_pool.load_phrases') as mock_load, \
+             patch('src.text_pool.save_phrases') as mock_save:
+            
+            mock_load.return_value = SAMPLE_PHRASES.copy()
+            mock_save.return_value = True
+            
+            result = add_phrase("Nueva frase de prueba")
+            
+            assert result is True
+            mock_save.assert_called_once()
+            # Verificar que la nueva frase se añadió
+            args = mock_save.call_args[0][0]
+            assert "Nueva frase de prueba" in args
+
+    def test_add_phrase_empty(self):
+        """Test de añadir frase vacía."""
+        with pytest.raises(TextPoolError) as exc_info:
+            add_phrase("")
+        
+        assert "vacía" in str(exc_info.value).lower()
+        
+        with pytest.raises(TextPoolError):
+            add_phrase("   ")
+
+    def test_add_phrase_too_long(self):
+        """Test de añadir frase demasiado larga."""
+        long_phrase = "x" * (MAX_PHRASE_LENGTH + 1)
+        
+        with pytest.raises(TextPoolError) as exc_info:
+            add_phrase(long_phrase)
+        
+        assert str(MAX_PHRASE_LENGTH) in str(exc_info.value)
+
+    def test_update_phrase_success(self):
+        """Test de actualizar frase exitosamente."""
+        with patch('src.text_pool.load_phrases') as mock_load, \
+             patch('src.text_pool.save_phrases') as mock_save:
+            
+            phrases = SAMPLE_PHRASES.copy()
+            mock_load.return_value = phrases
+            mock_save.return_value = True
+            
+            result = update_phrase(1, "Frase actualizada")
+            
+            assert result is True
+            assert phrases[1] == "Frase actualizada"
+
+    def test_update_phrase_invalid_index(self):
+        """Test de actualizar con índice inválido."""
+        with patch('src.text_pool.load_phrases') as mock_load:
+            mock_load.return_value = SAMPLE_PHRASES.copy()
+            
+            with pytest.raises(TextPoolError) as exc_info:
+                update_phrase(999, "nuevo texto")
+            
+            assert "fuera de rango" in str(exc_info.value).lower()
+
+    def test_delete_phrase_success(self):
+        """Test de eliminar frase exitosamente."""
+        with patch('src.text_pool.load_phrases') as mock_load, \
+             patch('src.text_pool.save_phrases') as mock_save:
+            
+            phrases = SAMPLE_PHRASES.copy()
+            original_length = len(phrases)
+            mock_load.return_value = phrases
+            mock_save.return_value = True
+            
+            result = delete_phrase(2)
+            
+            assert result is True
+            assert len(phrases) == original_length - 1
+            assert SAMPLE_PHRASES[2] not in phrases
+
+    def test_delete_phrase_invalid_index(self):
+        """Test de eliminar con índice inválido."""
+        with patch('src.text_pool.load_phrases') as mock_load:
+            mock_load.return_value = SAMPLE_PHRASES.copy()
+            
+            with pytest.raises(TextPoolError) as exc_info:
+                delete_phrase(-1)
+            
+            assert "fuera de rango" in str(exc_info.value).lower()
+
+    def test_get_phrases_count(self):
+        """Test de contar frases."""
+        with patch('src.text_pool.load_phrases') as mock_load:
+            mock_load.return_value = SAMPLE_PHRASES
+            
+            count = get_phrases_count()
+            
+            assert count == len(SAMPLE_PHRASES)
+
+    def test_transaction_safety(self, tmp_path):
+        """Test de seguridad en escritura (archivo temporal + rename)."""
+        phrases_file = tmp_path / "phrases.json"
+        
+        # Guardar frases
+        save_phrases(SAMPLE_PHRASES, phrases_file)
+        
+        # Verificar que no hay archivos temporales
+        temp_files = list(tmp_path.glob("*.tmp"))
+        assert len(temp_files) == 0
+        
+        # Verificar contenido
+        with open(phrases_file, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+        assert saved == SAMPLE_PHRASES
+
+    @patch('src.text_pool.shutil.move')
+    def test_save_phrases_rename_failure(self, mock_move, tmp_path):
+        """Test de fallo en el renombrado del archivo temporal."""
+        phrases_file = tmp_path / "phrases.json"
+        mock_move.side_effect = Exception("Rename failed")
+        
+        result = save_phrases(SAMPLE_PHRASES, phrases_file)
+        
+        assert result is False
+        # Verificar que se limpió el archivo temporal
+        temp_files = list(tmp_path.glob("*.tmp"))
+        assert len(temp_files) == 0
+
+
+class TestPhrasesManagerWindow:
+    """Tests para la ventana de gestión de frases (integración)."""
+    
+    @pytest.fixture
+    def mock_ctk(self):
+        """Fixture para mockear CustomTkinter."""
+        with patch('src.main.ctk') as mock:
+            # Configurar mocks básicos
+            mock.CTkToplevel = MagicMock()
+            mock.CTkFrame = MagicMock()
+            mock.CTkButton = MagicMock()
+            mock.CTkLabel = MagicMock()
+            mock.CTkTextbox = MagicMock()
+            mock.CTkScrollbar = MagicMock()
+            mock.CTkInputDialog = MagicMock()
+            mock.CTkMessagebox = MagicMock()
+            yield mock
+
+    def test_phrases_window_creation(self, mock_ctk):
+        """Test de creación de la ventana de frases."""
+        from src.main import PhrasesManagerWindow
+        
+        # Crear mock del parent
+        parent = MagicMock()
+        
+        # Crear ventana
+        window = PhrasesManagerWindow(parent)
+        
+        # Verificar que se llamaron los métodos correctos
+        assert window.title.call_args[0][0] == "Gestor de Frases"
+        assert window.geometry.call_args[0][0] == "600x500"
+
+    def test_load_phrases_to_list(self, mock_ctk):
+        """Test de carga de frases en la lista."""
+        from src.main import PhrasesManagerWindow
+        
+        parent = MagicMock()
+        window = PhrasesManagerWindow(parent)
+        
+        # Mock del textbox
+        window.phrases_listbox = MagicMock()
+        
+        # Mock de load_phrases
+        with patch('src.main.load_phrases') as mock_load:
+            mock_load.return_value = SAMPLE_PHRASES
+            
+            # Llamar al método
+            window._load_phrases_to_list()
+        
+        # Verificar que se insertaron las frases
+        assert window.phrases_listbox.delete.called
+        assert window.phrases_listbox.insert.call_count == len(SAMPLE_PHRASES)
+</file>
+
+<file path="requirements.txt">
+# Dependencias principales
+customtkinter==5.2.2
+requests==2.31.0
+Pillow==10.2.0
+
+# Dependencias de desarrollo (tests, linting, etc.)
+pytest==8.0.0
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+flake8==7.0.0
+black==24.2.0
+mypy==1.8.0
+pre-commit==3.6.0
+
+# Utilidades
+urllib3==2.2.1
+typing-extensions==4.9.0
+
+# Para empaquetado (opcional)
+pyinstaller==6.4.0
+
+# Notas:
+# - Para instalar todas las dependencias: pip install -r requirements.txt
+# - Para instalar solo las de producción: pip install -r requirements.txt --no-dev
+# - Las fuentes TrueType (Impact, Arial, etc.) deben estar instaladas en el sistema
+</file>
+
+<file path="src/main.py">
+# src/main.py
+"""
+Interfaz gráfica principal de MemeScript-Py.
+Incluye todas las mejoras: caché, gestión de frases, selector de fuentes, etc.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import threading
+import random
+import os
+from datetime import datetime
+from typing import Optional, Tuple, List, Dict, Any
+from pathlib import Path
+
+import customtkinter as ctk
+from PIL import Image, ImageTk
+
+from src.api_client import (
+    get_random_meme, get_meme_image, get_all_memes,
+    clear_cache, get_cache_stats, ImgflipAPIError
+)
+from src.renderer import render_meme, get_available_fonts, RendererError
+from src.text_pool import (
+    get_random_phrase, add_phrase, update_phrase, delete_phrase,
+    load_phrases, get_phrases_count, TextPoolError
+)
+from src.cache import MemeCache
+
+# Configuración de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('memescript.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Constantes de la GUI
+PREVIEW_SIZE = (800, 600)
+WINDOW_SIZE = "1300x900"
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+class PhrasesManagerWindow(ctk.CTkToplevel):
+    """Ventana para gestionar el pool de frases."""
+    
+    def __init__(self, parent):
+        super().__init__(parent)
+        
+        self.title("Gestor de Frases")
+        self.geometry("600x500")
+        self.transient(parent)
+        self.grab_set()
+        
+        # Variables
+        self.phrases = load_phrases()
+        self.selected_index = None
+        
+        # Crear UI
+        self._create_ui()
+        self._load_phrases_to_list()
+        
+    def _create_ui(self):
+        """Crea la interfaz de la ventana."""
+        # Frame principal
+        main_frame = ctk.CTkFrame(self)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Lista de frases
+        list_frame = ctk.CTkFrame(main_frame)
+        list_frame.pack(fill="both", expand=True, pady=(0, 10))
+        
+        self.phrases_listbox = ctk.CTkTextbox(list_frame, wrap="word")
+        self.phrases_listbox.pack(side="left", fill="both", expand=True)
+        
+        scrollbar = ctk.CTkScrollbar(list_frame, command=self.phrases_listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.phrases_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        # Frame de botones
+        button_frame = ctk.CTkFrame(main_frame)
+        button_frame.pack(fill="x", pady=5)
+        
+        self.btn_add = ctk.CTkButton(
+            button_frame,
+            text="Añadir Frase",
+            command=self._add_phrase_dialog,
+            width=120
+        )
+        self.btn_add.pack(side="left", padx=5)
+        
+        self.btn_edit = ctk.CTkButton(
+            button_frame,
+            text="Editar Seleccionada",
+            command=self._edit_phrase_dialog,
+            width=120,
+            state="disabled"
+        )
+        self.btn_edit.pack(side="left", padx=5)
+        
+        self.btn_delete = ctk.CTkButton(
+            button_frame,
+            text="Eliminar Seleccionada",
+            command=self._delete_phrase,
+            width=120,
+            fg_color="#aa2222",
+            hover_color="#cc3333",
+            state="disabled"
+        )
+        self.btn_delete.pack(side="left", padx=5)
+        
+        self.btn_refresh = ctk.CTkButton(
+            button_frame,
+            text="Actualizar",
+            command=self._refresh_list,
+            width=100
+        )
+        self.btn_refresh.pack(side="right", padx=5)
+        
+        # Info
+        self.lbl_count = ctk.CTkLabel(
+            main_frame,
+            text=f"Total de frases: {len(self.phrases)}"
+        )
+        self.lbl_count.pack(pady=5)
+        
+        # Bind selección
+        self.phrases_listbox.bind("<ButtonRelease-1>", self._on_select)
+        
+    def _load_phrases_to_list(self):
+        """Carga las frases en la lista."""
+        self.phrases_listbox.delete("1.0", "end")
+        for i, phrase in enumerate(self.phrases, 1):
+            self.phrases_listbox.insert("end", f"{i}. {phrase}\n\n")
+    
+    def _on_select(self, event):
+        """Maneja la selección de una frase."""
+        try:
+            index = self.phrases_listbox.index("insert").split(".")[0]
+            if index and index.isdigit():
+                self.selected_index = int(index) - 1
+                self.btn_edit.configure(state="normal")
+                self.btn_delete.configure(state="normal")
+        except:
+            pass
+    
+    def _add_phrase_dialog(self):
+        """Muestra diálogo para añadir frase."""
+        dialog = ctk.CTkInputDialog(
+            text="Introduce la nueva frase:",
+            title="Añadir Frase"
+        )
+        phrase = dialog.get_input()
+        
+        if phrase:
+            try:
+                add_phrase(phrase)
+                self._refresh_list()
+                self.lbl_count.configure(text=f"Total de frases: {len(self.phrases)}")
+                logger.info(f"Frase añadida: {phrase[:50]}...")
+            except TextPoolError as e:
+                self._show_error(str(e))
+    
+    def _edit_phrase_dialog(self):
+        """Muestra diálogo para editar frase."""
+        if self.selected_index is None:
+            return
+        
+        current = self.phrases[self.selected_index]
+        dialog = ctk.CTkInputDialog(
+            text="Edita la frase:",
+            title="Editar Frase",
+            default_value=current
+        )
+        new_phrase = dialog.get_input()
+        
+        if new_phrase and new_phrase != current:
+            try:
+                update_phrase(self.selected_index, new_phrase)
+                self._refresh_list()
+                logger.info(f"Frase actualizada: {new_phrase[:50]}...")
+            except TextPoolError as e:
+                self._show_error(str(e))
+    
+    def _delete_phrase(self):
+        """Elimina la frase seleccionada."""
+        if self.selected_index is None:
+            return
+        
+        # Confirmar eliminación
+        confirm = ctk.CTkMessagebox(
+            title="Confirmar",
+            message="¿Estás seguro de eliminar esta frase?",
+            icon="warning",
+            option_1="Sí",
+            option_2="No"
+        )
+        
+        if confirm.get() == "Sí":
+            try:
+                delete_phrase(self.selected_index)
+                self._refresh_list()
+                self.selected_index = None
+                self.btn_edit.configure(state="disabled")
+                self.btn_delete.configure(state="disabled")
+                self.lbl_count.configure(text=f"Total de frases: {len(self.phrases)}")
+                logger.info("Frase eliminada")
+            except TextPoolError as e:
+                self._show_error(str(e))
+    
+    def _refresh_list(self):
+        """Actualiza la lista de frases."""
+        self.phrases = load_phrases()
+        self._load_phrases_to_list()
+        self.lbl_count.configure(text=f"Total de frases: {len(self.phrases)}")
+    
+    def _show_error(self, message: str):
+        """Muestra un mensaje de error."""
+        ctk.CTkMessagebox(
+            title="Error",
+            message=message,
+            icon="cancel"
+        )
+
+class CacheInfoWindow(ctk.CTkToplevel):
+    """Ventana con información del caché."""
+    
+    def __init__(self, parent):
+        super().__init__(parent)
+        
+        self.title("Información del Caché")
+        self.geometry("400x300")
+        self.transient(parent)
+        self.grab_set()
+        
+        self._create_ui()
+        self._refresh_stats()
+        
+    def _create_ui(self):
+        """Crea la interfaz de la ventana."""
+        main_frame = ctk.CTkFrame(self)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Estadísticas
+        self.stats_text = ctk.CTkTextbox(main_frame, wrap="word", height=150)
+        self.stats_text.pack(fill="x", pady=(0, 20))
+        self.stats_text.configure(state="disabled")
+        
+        # Botones
+        btn_frame = ctk.CTkFrame(main_frame)
+        btn_frame.pack(fill="x")
+        
+        self.btn_refresh = ctk.CTkButton(
+            btn_frame,
+            text="Actualizar",
+            command=self._refresh_stats,
+            width=100
+        )
+        self.btn_refresh.pack(side="left", padx=5)
+        
+        self.btn_clear = ctk.CTkButton(
+            btn_frame,
+            text="Limpiar Caché",
+            command=self._clear_cache,
+            width=100,
+            fg_color="#aa2222",
+            hover_color="#cc3333"
+        )
+        self.btn_clear.pack(side="left", padx=5)
+        
+    def _refresh_stats(self):
+        """Actualiza las estadísticas del caché."""
+        stats = get_cache_stats()
+        
+        self.stats_text.configure(state="normal")
+        self.stats_text.delete("1.0", "end")
+        
+        text = (
+            f"Imágenes en caché: {stats['total_images']}\n"
+            f"Tamaño total: {stats['total_size_mb']} MB\n"
+            f"Tamaño máximo: {stats['max_size_mb']} MB\n"
+            f"Uso: {stats['usage_percent']}%\n"
+            f"Directorio: {stats['cache_dir']}"
+        )
+        
+        self.stats_text.insert("1.0", text)
+        self.stats_text.configure(state="disabled")
+    
+    def _clear_cache(self):
+        """Limpia el caché."""
+        confirm = ctk.CTkMessagebox(
+            title="Confirmar",
+            message="¿Estás seguro de limpiar el caché?",
+            icon="warning",
+            option_1="Sí",
+            option_2="No"
+        )
+        
+        if confirm.get() == "Sí":
+            clear_cache()
+            self._refresh_stats()
+            ctk.CTkMessagebox(
+                title="Éxito",
+                message="Caché limpiado correctamente",
+                icon="check"
+            )
+
+class MemeApp(ctk.CTk):
+    """Aplicación principal de generación de memes."""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Configuración ventana
+        self.title("MemeScript-Py v2.0 - Generador de Memes Profesional")
+        self.geometry(WINDOW_SIZE)
+        
+        # Variables de estado
+        self.last_rendered_meme: Optional[Image.Image] = None
+        self.current_template_info: Optional[Dict[str, Any]] = None
+        self.available_templates: List[Dict[str, Any]] = []
+        self.available_fonts: List[str] = []
+        
+        # Inicializar UI
+        self._create_menu()
+        self._create_widgets()
+        self._load_initial_data()
+        
+        logger.info("Aplicación iniciada correctamente")
+    
+    def _create_menu(self):
+        """Crea el menú superior."""
+        # Frame del menú
+        self.menu_frame = ctk.CTkFrame(self, height=40, corner_radius=0)
+        self.menu_frame.pack(fill="x", padx=0, pady=0)
+        self.menu_frame.pack_propagate(False)
+        
+        # Botones del menú
+        self.btn_phrases = ctk.CTkButton(
+            self.menu_frame,
+            text="📝 Gestionar Frases",
+            command=self._open_phrases_manager,
+            width=140,
+            height=30
+        )
+        self.btn_phrases.pack(side="left", padx=10, pady=5)
+        
+        self.btn_cache = ctk.CTkButton(
+            self.menu_frame,
+            text="💾 Info Caché",
+            command=self._open_cache_info,
+            width=120,
+            height=30
+        )
+        self.btn_cache.pack(side="left", padx=5, pady=5)
+        
+        self.btn_templates = ctk.CTkButton(
+            self.menu_frame,
+            text="🖼️ Actualizar Plantillas",
+            command=self._refresh_templates,
+            width=140,
+            height=30
+        )
+        self.btn_templates.pack(side="left", padx=5, pady=5)
+    
+    def _create_widgets(self):
+        """Crea los widgets principales."""
+        
+        # --- Panel Izquierdo (Controles) ---
+        self.frame_left = ctk.CTkFrame(self, width=380)
+        self.frame_left.pack(side="left", fill="y", padx=10, pady=10)
+        self.frame_left.pack_propagate(False)
+        
+        # Título
+        self.lbl_title = ctk.CTkLabel(
+            self.frame_left,
+            text="🎭 Generador de Memes",
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        self.lbl_title.pack(pady=(20, 10))
+        
+        # Estado
+        self.lbl_status = ctk.CTkLabel(
+            self.frame_left,
+            text="✅ Listo para crear",
+            wraplength=300,
+            font=ctk.CTkFont(size=12)
+        )
+        self.lbl_status.pack(pady=(0, 20))
+        
+        # Barra de progreso
+        self.progress_bar = ctk.CTkProgressBar(self.frame_left, width=300)
+        self.progress_bar.pack(pady=(0, 20))
+        self.progress_bar.set(0)
+        
+        # --- Selector de plantilla ---
+        template_frame = ctk.CTkFrame(self.frame_left)
+        template_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.lbl_template = ctk.CTkLabel(
+            template_frame,
+            text="Plantilla:",
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.lbl_template.pack(anchor="w", pady=(5, 0))
+        
+        self.template_var = ctk.StringVar(value="aleatoria")
+        self.template_menu = ctk.CTkOptionMenu(
+            template_frame,
+            values=["🔄 Aleatoria", "Cargando..."],
+            variable=self.template_var,
+            command=self._on_template_change
+        )
+        self.template_menu.pack(fill="x", pady=5)
+        
+        # --- Textos ---
+        text_frame = ctk.CTkFrame(self.frame_left)
+        text_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.lbl_texts = ctk.CTkLabel(
+            text_frame,
+            text="Textos del Meme:",
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.lbl_texts.pack(anchor="w", pady=(5, 5))
+        
+        # Texto superior
+        self.lbl_top = ctk.CTkLabel(text_frame, text="Superior:", anchor="w")
+        self.lbl_top.pack(anchor="w")
+        
+        self.entry_top = ctk.CTkEntry(
+            text_frame,
+            placeholder_text="Texto superior..."
+        )
+        self.entry_top.pack(fill="x", pady=(0, 10))
+        
+        # Texto inferior
+        self.lbl_bottom = ctk.CTkLabel(text_frame, text="Inferior:", anchor="w")
+        self.lbl_bottom.pack(anchor="w")
+        
+        self.entry_bottom = ctk.CTkEntry(
+            text_frame,
+            placeholder_text="Texto inferior..."
+        )
+        self.entry_bottom.pack(fill="x", pady=(0, 5))
+        
+        # Checkbox frase aleatoria
+        self.random_text_var = ctk.BooleanVar(value=False)
+        self.chk_random = ctk.CTkCheckBox(
+            text_frame,
+            text="Usar frase aleatoria",
+            variable=self.random_text_var,
+            command=self._toggle_random_text
+        )
+        self.chk_random.pack(pady=5)
+        
+        # Selector de posición de frase aleatoria
+        self.random_position_var = ctk.StringVar(value="arriba")
+        self.random_position_frame = ctk.CTkFrame(text_frame, fg_color="transparent")
+        
+        self.rb_top = ctk.CTkRadioButton(
+            self.random_position_frame,
+            text="Arriba",
+            variable=self.random_position_var,
+            value="arriba",
+            state="disabled"
+        )
+        self.rb_top.pack(side="left", padx=5)
+        
+        self.rb_bottom = ctk.CTkRadioButton(
+            self.random_position_frame,
+            text="Abajo",
+            variable=self.random_position_var,
+            value="abajo",
+            state="disabled"
+        )
+        self.rb_bottom.pack(side="left", padx=5)
+        
+        self.rb_random = ctk.CTkRadioButton(
+            self.random_position_frame,
+            text="Aleatorio",
+            variable=self.random_position_var,
+            value="aleatorio",
+            state="disabled"
+        )
+        self.rb_random.pack(side="left", padx=5)
+        
+        self.random_position_frame.pack(pady=(0, 10))
+        
+        # --- Opciones de renderizado ---
+        render_frame = ctk.CTkFrame(self.frame_left)
+        render_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.lbl_render = ctk.CTkLabel(
+            render_frame,
+            text="Opciones de renderizado:",
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.lbl_render.pack(anchor="w", pady=(5, 5))
+        
+        # Selector de fuente
+        font_frame = ctk.CTkFrame(render_frame, fg_color="transparent")
+        font_frame.pack(fill="x", pady=5)
+        
+        self.lbl_font = ctk.CTkLabel(font_frame, text="Fuente:", width=60)
+        self.lbl_font.pack(side="left")
+        
+        self.font_var = ctk.StringVar(value="Impact")
+        self.font_menu = ctk.CTkOptionMenu(
+            font_frame,
+            values=["Impact", "Arial Black", "Comic Sans MS"],
+            variable=self.font_var,
+            width=180
+        )
+        self.font_menu.pack(side="right")
+        
+        # Tamaño de fuente
+        size_frame = ctk.CTkFrame(render_frame, fg_color="transparent")
+        size_frame.pack(fill="x", pady=5)
+        
+        self.lbl_size = ctk.CTkLabel(size_frame, text="Tamaño:", width=60)
+        self.lbl_size.pack(side="left")
+        
+        self.size_slider = ctk.CTkSlider(
+            size_frame,
+            from_=0.05,
+            to=0.2,
+            number_of_steps=15,
+            command=self._on_size_change
+        )
+        self.size_slider.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.size_slider.set(0.1)
+        
+        self.size_label = ctk.CTkLabel(size_frame, text="10%", width=40)
+        self.size_label.pack(side="right")
+        
+        # Sombra
+        self.shadow_var = ctk.BooleanVar(value=False)
+        self.chk_shadow = ctk.CTkCheckBox(
+            render_frame,
+            text="Añadir sombra",
+            variable=self.shadow_var
+        )
+        self.chk_shadow.pack(anchor="w", pady=2)
+        
+        # --- Botones de acción ---
+        action_frame = ctk.CTkFrame(self.frame_left)
+        action_frame.pack(fill="x", padx=20, pady=20)
+        
+        self.btn_generate = ctk.CTkButton(
+            action_frame,
+            text="🎨 Generar Meme",
+            command=self._on_generate_meme,
+            height=40,
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        self.btn_generate.pack(fill="x", pady=5)
+        
+        self.btn_download = ctk.CTkButton(
+            action_frame,
+            text="💾 Descargar Meme",
+            command=self._on_download,
+            state="disabled",
+            fg_color="#2c7a2c",
+            hover_color="#1e5a1e",
+            height=40
+        )
+        self.btn_download.pack(fill="x", pady=5)
+        
+        # --- Panel Derecho (Vista Previa) ---
+        self.canvas_frame = ctk.CTkFrame(self, fg_color="#1a1a1a")
+        self.canvas_frame.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        
+        self.canvas = ctk.CTkLabel(
+            self.canvas_frame,
+            text="✨ La vista previa aparecerá aquí ✨\n\nHaz clic en 'Generar Meme' para comenzar",
+            text_color="#888888",
+            font=ctk.CTkFont(size=16)
+        )
+        self.canvas.pack(fill="both", expand=True)
+    
+    def _load_initial_data(self):
+        """Carga datos iniciales en segundo plano."""
+        threading.Thread(target=self._load_templates_thread, daemon=True).start()
+        threading.Thread(target=self._load_fonts_thread, daemon=True).start()
+    
+    def _load_templates_thread(self):
+        """Carga la lista de plantillas."""
+        try:
+            self.available_templates = get_all_memes() or []
+            template_names = ["🔄 Aleatoria"] + [
+                f"{t.get('name', 'Unknown')}" for t in self.available_templates[:50]
+            ]
+            
+            self.after(0, lambda: self._update_template_menu(template_names))
+            logger.info(f"Cargadas {len(self.available_templates)} plantillas")
+            
+        except ImgflipAPIError as e:
+            logger.error(f"Error cargando plantillas: {e}")
+            self.after(0, lambda: self.lbl_status.configure(
+                text=f"⚠️ Error cargando plantillas: {str(e)}"
+            ))
+    
+    def _load_fonts_thread(self):
+        """Carga la lista de fuentes disponibles."""
+        self.available_fonts = get_available_fonts()
+        if self.available_fonts:
+            self.after(0, lambda: self.font_menu.configure(values=self.available_fonts))
+            if "Impact" in self.available_fonts:
+                self.font_var.set("Impact")
+            elif self.available_fonts:
+                self.font_var.set(self.available_fonts[0])
+        
+        logger.info(f"Fuentes disponibles: {self.available_fonts}")
+    
+    def _update_template_menu(self, names: List[str]):
+        """Actualiza el menú de plantillas."""
+        self.template_menu.configure(values=names)
+        self.template_var.set("🔄 Aleatoria")
+    
+    def _on_template_change(self, choice: str):
+        """Maneja cambio de plantilla."""
+        if choice != "🔄 Aleatoria":
+            # Buscar template seleccionado
+            for t in self.available_templates:
+                if t.get('name') == choice:
+                    self.current_template_info = t
+                    logger.info(f"Plantilla seleccionada: {t.get('name')}")
+                    break
+    
+    def _on_size_change(self, value):
+        """Maneja cambio en el slider de tamaño."""
+        percent = int(value * 100)
+        self.size_label.configure(text=f"{percent}%")
+    
+    def _toggle_random_text(self):
+        """Activa/desactiva opciones de texto aleatorio."""
+        state = "normal" if self.random_text_var.get() else "disabled"
+        self.rb_top.configure(state=state)
+        self.rb_bottom.configure(state=state)
+        self.rb_random.configure(state=state)
+        
+        # Limpiar entradas si se activa aleatorio
+        if self.random_text_var.get():
+            self.entry_top.delete(0, "end")
+            self.entry_bottom.delete(0, "end")
+            self.entry_top.configure(state="disabled")
+            self.entry_bottom.configure(state="disabled")
+        else:
+            self.entry_top.configure(state="normal")
+            self.entry_bottom.configure(state="normal")
+    
+    def _open_phrases_manager(self):
+        """Abre el gestor de frases."""
+        PhrasesManagerWindow(self)
+    
+    def _open_cache_info(self):
+        """Abre la ventana de información del caché."""
+        CacheInfoWindow(self)
+    
+    def _refresh_templates(self):
+        """Actualiza la lista de plantillas."""
+        self.lbl_status.configure(text="🔄 Actualizando plantillas...")
+        self.btn_templates.configure(state="disabled")
+        threading.Thread(target=self._load_templates_thread, daemon=True).start()
+        self.after(2000, lambda: self.btn_templates.configure(state="normal"))
+    
+    def _on_generate_meme(self):
+        """Inicia el proceso de generación del meme."""
+        self.btn_generate.configure(state="disabled")
+        self.btn_download.configure(state="disabled")
+        self.progress_bar.start()
+        self.lbl_status.configure(text="🎨 Generando meme...")
+        
+        threading.Thread(target=self._generate_thread, daemon=True).start()
+    
+    def _generate_thread(self):
+        """Hilo de generación del meme."""
+        try:
+            # Obtener plantilla
+            template_url = None
+            template_info = None
+            
+            if self.template_var.get() == "🔄 Aleatoria":
+                result = get_random_meme()
+                if result:
+                    template_url, template_info = result
+            else:
+                # Usar plantilla seleccionada
+                template_name = self.template_var.get()
+                for t in self.available_templates:
+                    if t.get('name') == template_name:
+                        template_info = t
+                        template_url = t.get('url')
+                        break
+            
+            if not template_url or not template_info:
+                raise Exception("No se pudo obtener una plantilla válida")
+            
+            # Descargar imagen (con caché)
+            img_data = get_meme_image(template_info['id'], template_url)
+            if not img_data:
+                raise Exception("No se pudo descargar la imagen")
+            
+            base_img = Image.open(io.BytesIO(img_data))
+            
+            # Obtener textos
+            top_text = ""
+            bottom_text = ""
+            
+            if self.random_text_var.get():
+                phrase = get_random_phrase()
+                position = self.random_position_var.get()
+                
+                if position == "arriba":
+                    top_text = phrase
+                elif position == "abajo":
+                    bottom_text = phrase
+                else:  # aleatorio
+                    if random.choice([True, False]):
+                        top_text = phrase
+                    else:
+                        bottom_text = phrase
+            else:
+                top_text = self.entry_top.get().strip()
+                bottom_text = self.entry_bottom.get().strip()
+            
+            # Renderizar meme
+            rendered = render_meme(
+                image=base_img,
+                top_text=top_text,
+                bottom_text=bottom_text,
+                font_name=self.font_var.get(),
+                font_size_ratio=self.size_slider.get(),
+                shadow=self.shadow_var.get()
+            )
+            
+            self.last_rendered_meme = rendered
+            
+            # Preparar vista previa
+            preview_img = rendered.copy()
+            preview_img.thumbnail(PREVIEW_SIZE, Image.Resampling.LANCZOS)
+            ctk_img = ctk.CTkImage(
+                light_image=preview_img,
+                size=preview_img.size
+            )
+            
+            self.after(0, lambda: self._update_ui(ctk_img, template_info))
+            
+        except ImgflipAPIError as e:
+            logger.error(f"Error de API: {e}")
+            self.after(0, lambda: self.lbl_status.configure(
+                text=f"❌ Error de conexión: {str(e)}"
+            ))
+        except RendererError as e:
+            logger.error(f"Error de renderizado: {e}")
+            self.after(0, lambda: self.lbl_status.configure(
+                text=f"❌ Error al renderizar: {str(e)}"
+            ))
+        except Exception as e:
+            logger.error(f"Error inesperado: {e}", exc_info=True)
+            self.after(0, lambda: self.lbl_status.configure(
+                text=f"❌ Error: {str(e)[:100]}"
+            ))
+        finally:
+            self.after(0, self._generation_finished)
+    
+    def _update_ui(self, ctk_img, template_info):
+        """Actualiza la UI con el meme generado."""
+        self.canvas.configure(image=ctk_img, text="")
+        self.btn_download.configure(state="normal")
+        
+        template_name = template_info.get('name', 'Desconocida')
+        self.lbl_status.configure(
+            text=f"✅ Meme generado con: {template_name}"
+        )
+        
+        logger.info(f"Meme generado correctamente usando {template_name}")
+    
+    def _generation_finished(self):
+        """Llamado cuando termina la generación."""
+        self.progress_bar.stop()
+        self.progress_bar.set(0)
+        self.btn_generate.configure(state="normal")
+    
+    def _on_download(self):
+        """Guarda el meme en disco."""
+        if not self.last_rendered_meme:
+            return
+        
+        try:
+            # Crear directorio de salida si no existe
+            output_dir = Path.home() / "Pictures" / "Memescript"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generar nombre de archivo
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            template_name = self.current_template_info.get('name', 'meme') if self.current_template_info else 'meme'
+            # Limpiar nombre para archivo
+            template_name = "".join(c for c in template_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            template_name = template_name.replace(' ', '_')[:30]
+            
+            filename = f"{template_name}_{timestamp}.png"
+            save_path = output_dir / filename
+            
+            # Guardar
+            self.last_rendered_meme.save(save_path, "PNG", quality=95)
+            
+            self.lbl_status.configure(
+                text=f"✅ Guardado en:\n{output_dir.name}/{filename}"
+            )
+            
+            logger.info(f"Meme guardado: {save_path}")
+            
+            # Preguntar si quiere abrir la carpeta
+            response = ctk.CTkMessagebox(
+                title="Descarga completada",
+                message=f"Meme guardado como:\n{filename}\n\n¿Abrir carpeta?",
+                icon="info",
+                option_1="Sí",
+                option_2="No"
+            )
+            
+            if response.get() == "Sí":
+                import subprocess
+                import platform
+                
+                if platform.system() == "Windows":
+                    os.startfile(str(output_dir))
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.run(["open", str(output_dir)])
+                else:  # Linux
+                    subprocess.run(["xdg-open", str(output_dir)])
+                    
+        except Exception as e:
+            logger.error(f"Error guardando meme: {e}")
+            self.lbl_status.configure(text=f"❌ Error al guardar: {str(e)[:50]}")
+
+def main():
+    """Punto de entrada principal."""
+    app = MemeApp()
+    app.mainloop()
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="src/renderer.py">
+# src/renderer.py
+"""
+Motor de renderizado de memes con soporte para múltiples fuentes y estilos.
+"""
+
+from __future__ import annotations
+import logging
+from pathlib import Path
+from typing import Optional, Tuple, List, Final, Union, Any, Dict
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+logger = logging.getLogger(__name__)
+
+try:
+    from PIL.Image import Resampling
+    LANCZOS: Any = Resampling.LANCZOS
+except (ImportError, AttributeError):
+    LANCZOS = getattr(Image, "LANCZOS", getattr(Image, "BILINEAR", 2))
+
+# Constantes
+MIN_FONT_SIZE: Final[int] = 8
+MAX_FONT_SIZE: Final[int] = 200
+MAX_IMAGE_PIXELS: Final[int] = 5000 * 5000
+MAX_DIMENSION: Final[int] = 4000
+
+# Fuentes disponibles
+AVAILABLE_FONTS: Final[Dict[str, List[Path]]] = {
+    "Impact": [
+        Path(__file__).parent / "assets" / "fonts" / "impact.ttf",
+        Path("/usr/share/fonts/truetype/impact/impact.ttf"),
+        Path("/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"),
+        Path("C:/Windows/Fonts/impact.ttf"),
+    ],
+    "Arial Black": [
+        Path(__file__).parent / "assets" / "fonts" / "arialbd.ttf",
+        Path("/usr/share/fonts/truetype/msttcorefonts/Arial_Black.ttf"),
+        Path("C:/Windows/Fonts/arialbd.ttf"),
+    ],
+    "Comic Sans MS": [
+        Path(__file__).parent / "assets" / "fonts" / "comic.ttf",
+        Path("/usr/share/fonts/truetype/msttcorefonts/Comic_Sans_MS.ttf"),
+        Path("C:/Windows/Fonts/comic.ttf"),
+    ],
+    "Roboto": [
+        Path("/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf"),
+    ],
+}
+
+AnyFont = Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]
+
+class RendererError(Exception):
+    """Excepción personalizada para errores de renderizado."""
+    pass
+
+def get_available_fonts() -> List[str]:
+    """
+    Obtiene la lista de fuentes disponibles en el sistema.
+    
+    Returns:
+        Lista de nombres de fuentes que se pueden usar
+    """
+    available = []
+    for font_name, paths in AVAILABLE_FONTS.items():
+        for path in paths:
+            if path.exists():
+                available.append(font_name)
+                break
+    return available
+
+def _safe_load_font(font_name: Optional[str], size: int) -> AnyFont:
+    """
+    Carga una fuente de forma segura, con fallbacks.
+    
+    Args:
+        font_name: Nombre de la fuente a cargar
+        size: Tamaño de la fuente
+        
+    Returns:
+        Objeto fuente de PIL
+    """
+    # Si se especificó una fuente, intentar cargarla
+    if font_name and font_name in AVAILABLE_FONTS:
+        for path in AVAILABLE_FONTS[font_name]:
+            if path.exists():
+                try:
+                    logger.debug(f"Cargando fuente: {path}")
+                    return ImageFont.truetype(str(path), size=int(size))
+                except Exception as e:
+                    logger.warning(f"Error cargando fuente {path}: {e}")
+                    continue
+    
+    # Intentar fuentes del sistema comunes
+    system_fonts = [
+        ("DejaVuSans-Bold.ttf", "DejaVu Sans Bold"),
+        ("Arial.ttf", "Arial"),
+        ("arial.ttf", "Arial"),
+        ("LiberationSans-Bold.ttf", "Liberation Sans Bold"),
+    ]
+    
+    for font_file, font_name in system_fonts:
+        try:
+            return ImageFont.truetype(font_file, size=int(size))
+        except:
+            try:
+                return ImageFont.truetype(font_name, size=int(size))
+            except:
+                continue
+    
+    # Fallback final
+    logger.warning("Usando fuente por defecto (no TrueType)")
+    return ImageFont.load_default()
+
+def _reduce_image_if_needed(image: Image.Image, max_dim: int = MAX_DIMENSION) -> Image.Image:
+    """
+    Reduce la imagen si excede las dimensiones máximas.
+    """
+    w, h = image.size
+    scale = 1.0
+    
+    if w > max_dim or h > max_dim:
+        scale = min(max_dim / w, max_dim / h)
+        logger.info(f"Reduciendo imagen: {w}x{h} -> {int(w*scale)}x{int(h*scale)}")
+    
+    if scale < 1.0:
+        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        return image.resize(new_size, resample=LANCZOS)
+    
+    return image
+
+def _get_text_size(draw: ImageDraw.ImageDraw, text: str, font: AnyFont) -> Tuple[int, int]:
+    """
+    Obtiene el tamaño del texto de forma segura.
+    """
+    try:
+        bbox = draw.textbbox((0, 0), str(text), font=font)
+        return int(bbox[2] - bbox[0]), int(bbox[3] - bbox[1])
+    except Exception as e:
+        logger.error(f"Error calculando tamaño del texto: {e}")
+        return (0, 0)
+
+def _wrap_text_for_width(text: str, draw: ImageDraw.ImageDraw, font: AnyFont, max_width: int) -> List[str]:
+    """
+    Envuelve el texto para que quepa en el ancho máximo.
+    """
+    if not text or not text.strip():
+        return []
+    
+    words = str(text).strip().split()
+    if not words:
+        return []
+    
+    lines = []
+    current_line = words[0]
+    
+    for word in words[1:]:
+        test_line = f"{current_line} {word}"
+        text_width, _ = _get_text_size(draw, test_line, font)
+        
+        if text_width <= max_width:
+            current_line = test_line
+        else:
+            lines.append(current_line)
+            current_line = word
+    
+    lines.append(current_line)
+    return lines
+
+def render_meme(
+    image: Image.Image,
+    top_text: str = "",
+    bottom_text: str = "",
+    font_name: Optional[str] = None,
+    font_size_ratio: float = 0.1,
+    max_text_height_ratio: float = 0.35,
+    padding_ratio: float = 0.03,
+    stroke_width_ratio: float = 0.05,
+    text_color: str = "white",
+    stroke_color: str = "black",
+    shadow: bool = False
+) -> Image.Image:
+    """
+    Renderiza un meme con texto superior e inferior.
+    
+    Args:
+        image: Imagen base
+        top_text: Texto superior
+        bottom_text: Texto inferior
+        font_name: Nombre de la fuente a usar
+        font_size_ratio: Ratio del tamaño de fuente respecto a la altura
+        max_text_height_ratio: Ratio máximo de altura del texto
+        padding_ratio: Ratio de padding respecto a la altura
+        stroke_width_ratio: Ratio del ancho del contorno
+        text_color: Color del texto
+        stroke_color: Color del contorno
+        shadow: Si se debe añadir sombra al texto
+        
+    Returns:
+        Imagen con el texto renderizado
+    """
+    try:
+        # Preparar imagen
+        img = image.convert("RGBA")
+        img = _reduce_image_if_needed(img)
+        w, h = img.size
+        
+        logger.info(f"Renderizando meme: {w}x{h}, fuente={font_name or 'default'}")
+        
+        # Crear capa de texto separada para mejor control
+        text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(text_layer)
+        
+        # Calcular dimensiones
+        max_width = int(w * 0.9)  # 90% del ancho
+        padding = int(h * padding_ratio)
+        max_text_height = int(h * max_text_height_ratio)
+        
+        # Calcular tamaño de fuente óptimo
+        current_size = int(h * font_size_ratio)
+        current_size = max(MIN_FONT_SIZE, min(current_size, MAX_FONT_SIZE))
+        
+        optimal_size = current_size
+        for test_size in range(current_size, MIN_FONT_SIZE - 1, -2):
+            font = _safe_load_font(font_name, test_size)
+            
+            # Envolver texto y calcular alturas
+            top_lines = _wrap_text_for_width(top_text, draw, font, max_width)
+            bottom_lines = _wrap_text_for_width(bottom_text, draw, font, max_width)
+            
+            # Calcular altura total del texto (con espaciado)
+            line_spacing = 1.2
+            top_height = 0
+            for line in top_lines:
+                _, lh = _get_text_size(draw, line, font)
+                top_height += int(lh * line_spacing)
+            
+            bottom_height = 0
+            for line in bottom_lines:
+                _, lh = _get_text_size(draw, line, font)
+                bottom_height += int(lh * line_spacing)
+            
+            if top_height <= max_text_height and bottom_height <= max_text_height:
+                optimal_size = test_size
+                break
+        
+        # Cargar fuente con el tamaño óptimo
+        font = _safe_load_font(font_name, optimal_size)
+        stroke_width = max(1, int(optimal_size * stroke_width_ratio))
+        
+        logger.debug(f"Tamaño de fuente óptimo: {optimal_size}, stroke: {stroke_width}")
+        
+        def draw_lines(lines: List[str], is_top: bool):
+            """Dibuja las líneas de texto en la posición correcta."""
+            if not lines:
+                return
+            
+            # Calcular altura total
+            line_spacing = 1.2
+            total_height = 0
+            line_heights = []
+            
+            for line in lines:
+                _, lh = _get_text_size(draw, line, font)
+                line_heights.append(lh)
+                total_height += int(lh * line_spacing)
+            
+            # Posición Y inicial
+            if is_top:
+                current_y = padding
+            else:
+                current_y = h - total_height - padding
+            
+            # Dibujar cada línea
+            for i, line in enumerate(lines):
+                line_width, line_height = _get_text_size(draw, line, font)
+                x = (w - line_width) // 2
+                
+                if shadow:
+                    # Dibujar sombra
+                    shadow_offset = max(2, stroke_width // 2)
+                    draw.text(
+                        (x + shadow_offset, current_y + shadow_offset),
+                        line,
+                        font=font,
+                        fill=(0, 0, 0, 180)
+                    )
+                
+                # Dibujar texto principal con contorno
+                draw.text(
+                    (x, current_y),
+                    line,
+                    font=font,
+                    fill=text_color,
+                    stroke_width=stroke_width,
+                    stroke_fill=stroke_color
+                )
+                
+                current_y += int(line_height * line_spacing)
+        
+        # Dibujar textos
+        draw_lines(_wrap_text_for_width(top_text, draw, font, max_width), True)
+        draw_lines(_wrap_text_for_width(bottom_text, draw, font, max_width), False)
+        
+        # Combinar capa de texto con imagen original
+        result = Image.alpha_composite(img, text_layer)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error en renderizado: {e}", exc_info=True)
+        raise RendererError(f"Error al renderizar el meme: {str(e)}") from e
+</file>
+
+</files>

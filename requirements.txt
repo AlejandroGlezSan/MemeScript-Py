@@ -3,6 +3,23 @@ customtkinter==5.2.2
 requests==2.31.0
 Pillow==10.2.0
 
-# Herramientas de desarrollo (opcional, para calidad de código)
-# flake8==7.0.0
-# black==24.2.0
+# Dependencias de desarrollo (tests, linting, etc.)
+pytest==8.0.0
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+flake8==7.0.0
+black==24.2.0
+mypy==1.8.0
+pre-commit==3.6.0
+
+# Utilidades
+urllib3==2.2.1
+typing-extensions==4.9.0
+
+# Para empaquetado (opcional)
+pyinstaller==6.4.0
+
+# Notas:
+# - Para instalar todas las dependencias: pip install -r requirements.txt
+# - Para instalar solo las de producción: pip install -r requirements.txt --no-dev
+# - Las fuentes TrueType (Impact, Arial, etc.) deben estar instaladas en el sistema
